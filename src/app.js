@@ -50,7 +50,7 @@ export async function buildApp({ config, deps = {} }) {
     deps.allowlist ??
     (await new Allowlist({
       envDomains: config.allowedDomains,
-      filePath: path.join(config.dataDir, 'allowlist.json'),
+      filePath: config.allowlistFile, // null → in-memory only (ephemeral hosts)
       logger: app.log
     }).load());
 
@@ -92,8 +92,16 @@ export async function buildApp({ config, deps = {} }) {
   await app.register(fastifyCookie, { secret: config.sessionSecret, hook: 'onRequest' });
   await app.register(fastifyRateLimit, {
     global: false,
-    keyGenerator: (request) => request.ip,
+    keyGenerator: (request) => clientIp(request, config),
     errorResponseBuilder: () => new TooManyRequestsError()
+  });
+
+  // Behind a TLS-terminating edge (Render, Caddy) tell browsers to stick to
+  // HTTPS. Upstream HSTS headers are stripped, so this is the only one sent.
+  app.addHook('onSend', async (request, reply) => {
+    if (request.protocol === 'https' && !reply.hasHeader('strict-transport-security')) {
+      reply.header('strict-transport-security', 'max-age=31536000; includeSubDomains');
+    }
   });
 
   app.setErrorHandler(errorHandler);
@@ -112,7 +120,7 @@ export async function buildApp({ config, deps = {} }) {
     const level = reply.statusCode >= 500 ? 'error' : reply.statusCode >= 400 ? 'warn' : 'info';
     if (request.routeOptions?.logLevel === 'warn' && reply.statusCode < 400) return; // /health noise
     request.log[level](
-      { method: request.method, path: safePath(request.url), status: reply.statusCode, ms: Math.round(reply.elapsedTime), ip: request.ip },
+      { method: request.method, path: safePath(request.url), status: reply.statusCode, ms: Math.round(reply.elapsedTime), ip: clientIp(request, config) },
       'request'
     );
   });
@@ -123,6 +131,18 @@ export async function buildApp({ config, deps = {} }) {
   });
 
   return app;
+}
+
+/**
+ * Best available client address: a trusted edge header when configured
+ * (e.g. true-client-ip on Render), otherwise Fastify's proxy-aware request.ip.
+ */
+export function clientIp(request, config) {
+  if (config.clientIpHeader) {
+    const value = request.headers[config.clientIpHeader];
+    if (typeof value === 'string' && value.trim()) return value.split(',')[0].trim();
+  }
+  return request.ip;
 }
 
 function wantsJson(request) {

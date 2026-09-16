@@ -11,9 +11,9 @@ put on an allowlist can be opened, and a strict set of network rules makes it
 unusable as an SSRF tool against internal services. It does not try to defeat
 logins, CAPTCHAs, bot protection or content filters.
 
-The repository contains the application, its test-suite, a Docker/Caddy
-production stack with automatic HTTPS, and Terraform + shell automation to
-run it on an **Oracle Cloud Always Free** Ampere A1 (ARM64) server.
+The repository contains the application, its test-suite, a Dockerfile, a
+`docker-compose.yml` for local development, and a `render.yaml` Blueprint
+that deploys it to **Render** as a free Docker web service with HTTPS.
 
 ---
 
@@ -25,18 +25,13 @@ run it on an **Oracle Cloud Always Free** Ampere A1 (ARM64) server.
 4. [Environment variables](#4-environment-variables)
 5. [How the allowlist works](#5-how-the-allowlist-works)
 6. [Security model](#6-security-model)
-7. [Creating OCI credentials](#7-creating-oci-credentials)
-8. [Provisioning the Oracle server](#8-provisioning-the-oracle-server)
-9. [Configuring a domain](#9-configuring-a-domain)
-10. [How HTTPS works](#10-how-https-works)
-11. [Deploying updates](#11-deploying-updates)
-12. [Viewing logs](#12-viewing-logs)
-13. [Restarting the service](#13-restarting-the-service)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Destroying the infrastructure](#15-destroying-the-infrastructure)
-16. [Oracle Always Free limitations](#16-oracle-always-free-limitations)
-17. [ARM64 compatibility](#17-arm64-compatibility)
-18. [Project structure](#18-project-structure)
+7. [Deploying to Render](#7-deploying-to-render)
+8. [Custom domain and HTTPS](#8-custom-domain-and-https)
+9. [Viewing logs](#9-viewing-logs)
+10. [Restarting and redeploying](#10-restarting-and-redeploying)
+11. [Render free-tier limitations](#11-render-free-tier-limitations)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Project structure](#13-project-structure)
 
 ---
 
@@ -60,21 +55,21 @@ run it on an **Oracle Cloud Always Free** Ampere A1 (ARM64) server.
   allowed to follow them.
 * A protected **admin area** (`/admin`) lets you view, add and remove allowed
   domains and see health/status information.
-* `/health` returns a JSON status for monitoring.
+* `/health` returns a JSON status for monitoring and for Render's health check.
 
 ## 2. Architecture
 
 ```
                  Internet
-                    │
-        ┌───────────▼────────────┐   ports 80 / 443 only
-        │   Caddy (TLS edge)     │   automatic Let's Encrypt, HTTP→HTTPS,
-        │   caddy:2-alpine       │   compression, reverse proxy
-        └───────────┬────────────┘
-                    │ internal Docker network (app port never published)
+                    │  HTTPS (Render-managed certificate)
         ┌───────────▼────────────┐
-        │   AnonView (Node 24)   │   Fastify 5, runs as non-root `node`,
-        │   anonview-proxy       │   read-only filesystem, /data volume
+        │   Render edge / LB     │   TLS termination, HTTP→HTTPS redirect,
+        │                        │   X-Forwarded-*, True-Client-IP headers
+        └───────────┬────────────┘
+                    │ HTTP to the container on 0.0.0.0:$PORT (10000)
+        ┌───────────▼────────────┐
+        │   AnonView (Node 24)   │   Fastify 5, non-root user, stateless
+        │   Docker web service   │   (in-memory sessions, allowlist from env)
         └───────────┬────────────┘
                     │ HTTP(S) to allowlisted hosts only, via the SSRF-safe client
                     ▼
@@ -99,8 +94,8 @@ Request flow for `GET /p/https/example.com/a`:
    rewriter (`src/rewrite/html.js`); CSS by `src/rewrite/css.js`; everything
    else streams through with byte limits and timeouts.
 
-Everything is plain JavaScript with **no native addons**, which is what makes
-the ARM64 build trivial.
+Everything is plain JavaScript with **no native addons**, so the same
+Dockerfile builds on Render (amd64) and on ARM machines alike.
 
 ## 3. Local development
 
@@ -111,7 +106,7 @@ npm install
 cp .env.example .env          # edit PROXY_ALLOWED_DOMAINS, ADMIN_* …
 npm run dev                   # http://localhost:8080 with pretty logs (auto-reload)
 
-npm test                      # 90 tests against a local mock website (no network needed)
+npm test                      # 96 tests against a local mock website (no network needed)
 npm run lint                  # ESLint
 npm run check                 # lint + test
 ```
@@ -120,41 +115,50 @@ npm run check                 # lint + test
 development a random `SESSION_SECRET` is generated if you leave it empty;
 in production it is required.
 
-Docker locally (if you have Docker):
+### Local Docker (unchanged)
+
+`docker-compose.yml` runs the same image behind a local Caddy instance:
 
 ```bash
-docker compose up --build     # http://localhost (Caddy on :80, no domain → HTTP)
+cp .env.example .env
+docker compose up --build     # http://localhost  (Caddy on :80; with DOMAIN set, HTTPS via Let's Encrypt)
 ```
+
+Admin-added domains are persisted in the `app_data` volume
+(`ALLOWLIST_STORAGE=file`, the default). Caddy is only part of the local
+stack; Render provides TLS itself.
 
 ## 4. Environment variables
 
-All configuration comes from environment variables (`.env` locally, the
-server's `/opt/anonview/.env` in production — generated by `deploy.sh` from
-your `deploy.env`). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
+All configuration comes from environment variables (`.env` locally,
+Render's *Environment* tab in production — `render.yaml` predefines the
+non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT`, `HOST` | `8080`, `0.0.0.0` | Listen address (internal only in Docker). |
+| `PORT`, `HOST` | `8080`, `0.0.0.0` | Listen address. Render sets `PORT=10000`; the app always binds `0.0.0.0:$PORT`. |
 | `NODE_ENV` | `development` | `production` enforces `SESSION_SECRET`. |
 | `LOG_LEVEL` | `info` | pino log level. |
-| `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` from the reverse proxy (`true` in docker-compose). |
+| `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` from the reverse proxy (`true` on Render / docker-compose; a number = proxy hop count). |
+| `CLIENT_IP_HEADER` | *(empty)* | Header set by a trusted edge with the real client IP, used for rate limiting (`true-client-ip` on Render). |
 | `PROXY_ALLOWED_DOMAINS` | *(empty)* | Comma-separated allowlist, e.g. `example.com,*.example.com`. |
 | `PROXY_UNLISTED_URL_MODE` | `direct` | `direct`: links to unlisted domains stay direct; `proxy`: route them through the proxy (they get a "not authorized" page). |
 | `PROXY_SHOW_ALLOWLIST` | `true` | Show the allowed domains on the homepage. |
 | `PROXY_BANNER` | `true` | Inject the slim "viewing through AnonView" bar into proxied pages. |
 | `ADMIN_USERNAME`, `ADMIN_PASSWORD` | *(empty = admin disabled)* | Admin login. Password ≥ 12 characters, no common words. |
-| `SESSION_SECRET` | *(required in production)* | ≥ 32 random characters; signs session cookies. `openssl rand -hex 32`. |
+| `SESSION_SECRET` | *(required in production)* | ≥ 32 random characters; signs session cookies. Render generates it. |
 | `SESSION_TTL` / `SESSION_MAX` | `1800` / `5000` | Idle lifetime and maximum number of sessions kept in memory. |
 | `RATE_LIMIT` / `RATE_LIMIT_WINDOW` | `300` / `60` | Requests per client IP per window. |
 | `ADMIN_RATE_LIMIT` | `10` | Login attempts per IP per window. |
-| `MAX_RESPONSE_SIZE` | `20m` | Largest upstream response relayed (applies to compressed and decoded bytes). |
+| `MAX_RESPONSE_SIZE` | `20m` | Largest upstream response relayed (compressed and decoded bytes). |
 | `MAX_REQUEST_SIZE` | `2m` | Largest request body accepted. |
 | `REQUEST_TIMEOUT` | `30` | Seconds to wait for upstream headers / between body chunks. |
 | `CONNECT_TIMEOUT` | `10` | Seconds to establish the upstream TCP/TLS connection. |
 | `TRANSFER_TIMEOUT` | `300` | Hard cap on the duration of one proxied response. |
 | `MAX_CONCURRENT_UPSTREAM` | `64` | In-flight upstream requests across all visitors (503 beyond). |
-| `DATA_DIR` | `./data` | Where admin-added allowlist entries are persisted (`/data` volume in Docker). |
-| `DOMAIN`, `ACME_EMAIL` | *(empty)* | Used by Caddy: public domain for HTTPS and the Let's Encrypt contact e-mail. |
+| `ALLOWLIST_STORAGE` | `file` | `file`: admin-added domains persisted under `DATA_DIR`; `memory`: RAM only (Render — ephemeral disk). |
+| `DATA_DIR` | `./data` | Directory for `allowlist.json` when `ALLOWLIST_STORAGE=file`. |
+| `DOMAIN`, `ACME_EMAIL` | *(empty)* | Local docker-compose + Caddy only. Ignored on Render. |
 
 `.env` is git-ignored; never commit it. `.env.example` documents every key.
 
@@ -166,15 +170,19 @@ your `deploy.env`). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 * Entries can only be hostnames. IP addresses, ports and paths are rejected.
 * Two sources are merged:
   * `PROXY_ALLOWED_DOMAINS` from the environment — **locked**, shown as
-    "environment" in the admin UI; change them by editing the environment.
-  * Domains added in `/admin` — persisted to `DATA_DIR/allowlist.json`
-    (a Docker volume in production), survive restarts, removable in the UI.
+    "environment" in the admin UI; change them in Render's *Environment* tab
+    (Render redeploys automatically).
+  * Domains added in `/admin` — with `ALLOWLIST_STORAGE=file` (local Docker)
+    they are saved to `DATA_DIR/allowlist.json`; with `ALLOWLIST_STORAGE=memory`
+    (Render) they live in RAM and are **lost on restart or redeploy**. The
+    admin page says so. Treat `PROXY_ALLOWED_DOMAINS` as the source of truth on
+    Render and use the admin UI for quick experiments.
 * Everything not on the list gets a clear "Website not authorized" page. In the
   default `direct` mode, links and assets on a proxied page that point to
   unlisted domains are left as direct links (your browser would contact those
   sites directly if you follow them; images from unlisted CDNs load directly).
-  Set `PROXY_UNLISTED_URL_MODE=proxy` if you would rather have them blocked —
-  then add the CDN domains you need to the allowlist.
+  Set `PROXY_UNLISTED_URL_MODE=proxy` to have them blocked instead — then add
+  the CDN domains you need to the allowlist.
 
 ## 6. Security model
 
@@ -186,24 +194,25 @@ your `deploy.env`). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
   decimal, hex, IPv6, IPv4-mapped IPv6) and special-use names (`localhost`,
   `*.local`, `*.internal`, `*.lan`, `*.arpa`, `*.onion`, …) are always refused.
 * DNS results are validated inside the socket's `lookup` hook on every new
-  connection. Blocked: `0.0.0.0/8`, `10/8`, `100.64/10`, `127/8`,
-  `169.254/16` (cloud metadata), `172.16/12`, `192.0.0/24`, `192.0.2/24`,
-  `192.88.99/24`, `192.168/16`, `198.18/15`, `198.51.100/24`,
-  `203.0.113/24`, multicast, `240/4`; IPv6 `::`, `::1`, `::/96`, IPv4-mapped
-  and NAT64 forms of the above, `64:ff9b:1::/48`, `100::/64`, Teredo, 6to4,
-  documentation/benchmark/ORCHID ranges, `fc00::/7`, `fe80::/10`,
-  `fec0::/10`, multicast, `3fff::/20`, `5f00::/16`. A host whose answer mixes
-  public and private addresses is refused entirely.
+  connection (DNS-rebinding protection). Blocked: `0.0.0.0/8`, `10/8`,
+  `100.64/10`, `127/8`, `169.254/16` (cloud metadata), `172.16/12`,
+  `192.0.0/24`, `192.0.2/24`, `192.88.99/24`, `192.168/16`, `198.18/15`,
+  `198.51.100/24`, `203.0.113/24`, multicast, `240/4`; IPv6 `::`, `::1`,
+  `::/96`, IPv4-mapped and NAT64 forms of the above, `64:ff9b:1::/48`,
+  `100::/64`, Teredo, 6to4, documentation/benchmark/ORCHID ranges,
+  `fc00::/7`, `fe80::/10`, `fec0::/10`, multicast, `3fff::/20`, `5f00::/16`.
+  A host whose answer mixes public and private addresses is refused entirely.
 * Redirects (`Location`) are resolved and re-validated; redirects to unlisted
   or private destinations are stopped with an explanatory page.
 * Connect, header, idle and total-transfer timeouts; maximum response and
   request sizes; a cap on concurrent upstream requests; per-IP rate limiting
-  (stricter for admin login).
+  (stricter for admin login), keyed on Render's `True-Client-IP` header so a
+  spoofed `X-Forwarded-For` cannot open a fresh bucket.
 
 **Between visitor and proxy**
 
 * Upstream cookies never reach the browser; they live in a signed, HttpOnly,
-  SameSite session on the server and expire.
+  SameSite, `Secure` (over HTTPS) session on the server and expire.
 * `Cookie`, `Authorization`, `X-Forwarded-*`, `Sec-Fetch-*`, CDN headers and
   other client-identifying headers are never forwarded upstream; `Referer` and
   `Origin` are rewritten to their upstream form; a `Via` header identifies the
@@ -214,8 +223,8 @@ your `deploy.env`). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
   cannot apply policies to the proxy's origin; service-worker registration is
   disabled by the shim. Proxied pages get `Referrer-Policy: same-origin` and
   `X-Robots-Tag: noindex`.
-* The proxy's own pages carry a strict CSP and Helmet's security headers;
-  Caddy adds HSTS on HTTPS.
+* The proxy's own pages carry a strict CSP and Helmet's security headers; the
+  app sends `Strict-Transport-Security` on every HTTPS response.
 * Admin: constant-time credential comparison, signed `SameSite=Strict` session
   cookie, CSRF tokens on every state change, login rate limiting, `no-store`.
 * Errors shown to users are generic; details, stack traces and resolved
@@ -223,221 +232,212 @@ your `deploy.env`). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
   authorization headers, request bodies or query strings (proxied URLs are
   logged as `/p/https/host/…`), and pino redaction is configured as a
   second line of defence.
-* Container: non-root user, read-only root filesystem, all capabilities
-  dropped, `no-new-privileges`, memory limit, app port not published.
-* Host: only 22/80/443 open in both the OCI security list and the Ubuntu
-  iptables rules; SSH is key-only with fail2ban; unattended security updates.
+* Container: non-root user (uid 1000), production-only dependencies, memory
+  cap sized for Render's free instance; no secrets in the image or repo.
 
-See `test/ssrf.test.js` for the executable version of these guarantees.
+See `test/ssrf.test.js` and `test/render.test.js` for the executable version
+of these guarantees.
 
-## 7. Creating OCI credentials
+## 7. Deploying to Render
 
-The automation needs an **API signing key** for your Oracle Cloud user plus
-the OCI CLI and Terraform on your machine. It cannot create an Oracle account
-or pass Oracle's sign-up verification for you.
+Render builds the Dockerfile from your Git repository and runs it as a web
+service with a public HTTPS URL. The whole setup is described in
+[`render.yaml`](render.yaml) (a Render *Blueprint*); you only enter the
+secret values.
 
-1. Create/sign in to an account at <https://cloud.oracle.com>. Note the
-   **home region** shown at the top (Always Free compute only exists there).
-2. Top-right profile icon → **My profile** → **API keys** → **Add API key** →
-   **Generate API key pair** → download the *private* key → **Add**.
-3. Oracle shows a *Configuration file preview*. Save it as `~/.oci/config`
-   (Windows: `C:\Users\<you>\.oci\config`) and set `key_file` to where you
-   stored the private key, e.g.
+### 7.1 Create a Render account
 
-   ```ini
-   [DEFAULT]
-   user=ocid1.user.oc1..aaaaaaaa…
-   fingerprint=12:34:56:…
-   tenancy=ocid1.tenancy.oc1..aaaaaaaa…
-   region=eu-frankfurt-1
-   key_file=~/.oci/oci_api_key.pem
-   ```
+Go to <https://render.com>, click **Get Started** and sign up (GitHub or
+GitLab login is easiest — it also grants repository access). No credit card
+is required for the free plan.
 
-4. Install the tools:
-   * Windows: `winget install Oracle.OCI-CLI` and `winget install Hashicorp.Terraform`
-     (run `deploy.sh` from **Git Bash**).
-   * macOS: `brew install oci-cli terraform`
-   * Linux: `bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)"`
-     and <https://developer.hashicorp.com/terraform/install>.
-5. Check: `oci iam region-subscription list` should list your regions.
+### 7.2 Connect the Git repository
 
-`./deploy.sh` performs this check itself and prints exactly what is missing.
-
-## 8. Provisioning the Oracle server
+Push this project to a repository on GitHub or GitLab:
 
 ```bash
-cp deploy.env.example deploy.env      # edit: PROXY_ALLOWED_DOMAINS, DOMAIN, ADMIN_USERNAME, SSH_ALLOWED_CIDR …
-./deploy.sh
+git remote add origin git@github.com:<you>/anonview-proxy.git
+git push -u origin main
 ```
 
-What `./deploy.sh` does, in order:
+In Render, the first time you create a service you will be asked to install
+the Render GitHub/GitLab app and grant access to the repository.
 
-1. Checks prerequisites (bash, ssh, tar, curl, terraform) and generates an SSH
-   key at `~/.ssh/anonview` if needed.
-2. Verifies OCI authentication and discovers the tenancy and **home region**.
-3. Asks OCI's *Compute Capacity Report* API which availability domain has
-   room for `VM.Standard.A1.Flex` with your OCPU/RAM (then 1 OCPU/6 GB, then —
-   only if `ALLOW_X86_FALLBACK=true` — the x86 `VM.Standard.E2.1.Micro`).
-   **No instance is ever created blindly**; if nothing is available it stops
-   and explains what to do (see §16).
-4. Runs Terraform (`infra/terraform`): VCN `10.0.0.0/16`, internet gateway,
-   route table, security list (22 from `SSH_ALLOWED_CIDR`, 80, 443/tcp+udp),
-   public subnet, the Ubuntu 24.04 ARM64 instance (2 OCPU / 12 GB / 50 GB boot
-   volume by default) with a reserved public IP. Cloud-init installs Docker +
-   Compose, opens 80/443 in the host firewall, enables fail2ban and
-   unattended upgrades, and sets up Docker log rotation.
-   If an existing instance is found in the Terraform state it is reused.
-5. Waits for SSH and for cloud-init to finish.
-6. Uploads the project (excluding secrets, state and `node_modules`), writes
-   `/opt/anonview/.env` (mode 600) from `deploy.env`, generating
-   `SESSION_SECRET` and `ADMIN_PASSWORD` if you left them empty, then runs
-   `docker compose up -d --build` **on the server** (native ARM64 build).
-7. Waits for the container health checks, then verifies from your machine:
-   `/health`, an allowlisted site, an unlisted site (403), several SSRF
-   targets (400/403) and that `/admin` needs a login.
-8. Prints the public URL, health URL, SSH command and — once — a generated
-   admin password.
+### 7.3 Create the web service
 
-Other commands: `./deploy.sh infra` (server only), `./deploy.sh app`
-(redeploy only), `verify`, `status`, `logs`, `ssh`, `ip`.
+Recommended — **Blueprint** (uses `render.yaml`, nothing to type by hand):
 
-## 9. Configuring a domain
+1. Dashboard → **New +** → **Blueprint**.
+2. Select the repository and branch (`main`). Render detects `render.yaml`
+   and shows the `anonview-proxy` web service it will create.
+3. Fill in the prompted values (see 7.5) and click **Apply**.
 
-1. Buy/choose a domain and create an **A record** pointing at the server's
-   public IP (`./deploy.sh ip`). Wait until `nslookup your.domain` returns it.
-2. Set `DOMAIN=your.domain` and `ACME_EMAIL=you@example.com` in `deploy.env`.
-3. `./deploy.sh app` — Caddy obtains a certificate within about a minute.
+Alternative — manual **Web Service** (if you prefer not to use Blueprints):
+**New +** → **Web Service** → pick the repository → *Language*: **Docker**
+→ *Dockerfile path*: `./Dockerfile` → *Health Check Path*: `/health` →
+add the environment variables from 7.5 → **Create Web Service**.
 
-Without a domain the stack serves plain **HTTP on the IP address** — fine for
-testing, but there is no encryption between you and the proxy, and browsers
-treat the site as insecure. Use a domain for real use.
+### 7.4 Select the free plan
 
-## 10. How HTTPS works
+`render.yaml` already sets `plan: free`. In the manual flow choose
+**Free** under *Instance Type*. See §11 for what the free plan implies.
 
-Caddy (`deploy/caddy/Caddyfile`) sits in front of the app:
+### 7.5 Set environment variables
 
-* `DOMAIN` set → Caddy listens on 443, obtains and **renews** Let's Encrypt
-  certificates automatically (stored in the `caddy_data` volume), redirects
-  HTTP→HTTPS, adds HSTS, compresses responses, and proxies to `app:8080`.
-  Caddy's TLS defaults are modern (TLS 1.2+, strong ciphers, OCSP stapling).
-* `DOMAIN` empty → Caddy listens on 80 only.
-* The app only ever listens on the internal Docker network.
+Render's *Environment* tab (or the Blueprint prompt) is where all secrets
+live — none are committed. `render.yaml` predefines safe defaults for the
+non-secret variables and marks these for you to enter:
 
-## 11. Deploying updates
+| Variable | What to enter |
+|---|---|
+| `PROXY_ALLOWED_DOMAINS` | The sites visitors may open, comma-separated, e.g. `example.com,*.example.com,docs.python.org` |
+| `ADMIN_USERNAME` | Your admin login name, e.g. `admin` |
+| `ADMIN_PASSWORD` | A strong password, **at least 12 characters**, not containing "password"/"admin"/"changeme" |
+| `SESSION_SECRET` | Leave it to Render — the Blueprint has `generateValue: true`, which creates a random 256-bit value that persists across deploys. (Manual flow: click *Generate* or paste `openssl rand -hex 32`.) |
 
-```bash
-git pull            # or edit the code
-npm run check       # tests + lint locally
-./deploy.sh app     # upload, rebuild on the server, rolling restart, health check
+Predefined by `render.yaml` (change in the *Environment* tab if needed):
+`NODE_ENV=production`, `PORT=10000`, `HOST=0.0.0.0`, `TRUST_PROXY=true`,
+`CLIENT_IP_HEADER=true-client-ip`, `ALLOWLIST_STORAGE=memory`,
+`LOG_LEVEL=info`, `RATE_LIMIT=300`, `RATE_LIMIT_WINDOW=60`,
+`ADMIN_RATE_LIMIT=10`, `MAX_RESPONSE_SIZE=20m`, `MAX_REQUEST_SIZE=2m`,
+`REQUEST_TIMEOUT=30`, `CONNECT_TIMEOUT=10`, `TRANSFER_TIMEOUT=300`,
+`MAX_CONCURRENT_UPSTREAM=32`, `PROXY_UNLISTED_URL_MODE=direct`,
+`PROXY_SHOW_ALLOWLIST=true`, `PROXY_BANNER=true`.
+
+Changing any variable triggers an automatic redeploy.
+
+### 7.6 Deploy
+
+Click **Apply** (Blueprint) or **Create Web Service**. Render clones the
+repository, builds the Dockerfile (2–4 minutes the first time), starts the
+container and polls `/health` until it answers `200`; only then does traffic
+switch to the new instance. Every later `git push` to `main` deploys
+automatically (`autoDeploy: true`); you can also click **Manual Deploy**.
+
+### 7.7 Find the Render URL
+
+The service page shows the public URL at the top-left:
+
+```
+https://anonview-proxy.onrender.com
 ```
 
-Existing generated secrets on the server are preserved; anything set in
-`deploy.env` overrides the server's `.env`. Admin-added domains live in the
-`app_data` volume and survive updates and restarts.
+(If the name is already taken by someone else Render appends a random
+suffix, e.g. `https://anonview-proxy-x7k2.onrender.com`.) Open it — the
+homepage, `/health` and `/admin` are live immediately.
 
-## 12. Viewing logs
+### 7.8 Add a custom domain
 
-```bash
-./deploy.sh logs                       # follow app + caddy logs
-./deploy.sh ssh
-  cd /opt/anonview
-  docker compose logs --tail=200 app   # application (JSON lines, pino)
-  docker compose logs caddy            # access log + certificate events
-  sudo journalctl -u docker            # Docker daemon
-  sudo cat /var/log/cloud-init-output.log   # first-boot provisioning
-```
+See §8.
 
-Application log lines contain method, path (query stripped, proxied URLs as
-`/p/https/host/…`), status, duration and client IP — never cookies, tokens
-or bodies. Logs rotate at 10 MB × 3 files per container.
+### 7.9 HTTPS/TLS
 
-## 13. Restarting the service
+Automatic — see §8.
 
-```bash
-./deploy.sh ssh
-  cd /opt/anonview
-  docker compose restart app       # restart the proxy only
-  docker compose restart           # everything
-  docker compose down && docker compose up -d
-```
+### 7.10 Viewing logs
 
-Containers use `restart: unless-stopped`, Docker starts at boot and
-`live-restore` is enabled, so the service comes back by itself after crashes,
-Docker restarts and reboots (unattended upgrades reboot at 04:30 when
-required).
+See §9.
 
-## 14. Troubleshooting
+### 7.11 Restarting/redeploying
+
+See §10.
+
+### 7.12 Free-tier limitations and 7.13 spin-down
+
+See §11.
+
+## 8. Custom domain and HTTPS
+
+* Every Render web service gets an `https://<name>.onrender.com` URL with a
+  Render-managed TLS certificate; plain `http://` requests are redirected to
+  HTTPS. Nothing to configure.
+* Custom domain: service → **Settings** → **Custom Domains** → **Add Custom
+  Domain** → enter `proxy.example.com`. Render shows the DNS record to
+  create at your registrar (a `CNAME` to `<name>.onrender.com` for
+  subdomains, or `A`/`ALIAS` records for a root domain). Once DNS
+  propagates, Render issues and renews a Let's Encrypt certificate
+  automatically — TLS 1.2+/1.3, HTTP/2 and HTTP→HTTPS redirects included.
+* The app itself only speaks HTTP to Render's edge, trusts Render's
+  `X-Forwarded-Proto` (`TRUST_PROXY=true`) to mark cookies `Secure` and adds
+  `Strict-Transport-Security` on HTTPS responses.
+
+## 9. Viewing logs
+
+Service → **Logs** tab: live, searchable stdout/stderr of the container
+(JSON lines from pino). Filter for `"status":5` to spot upstream failures or
+`"level":40` for warnings. Log lines contain method, path (query stripped,
+proxied URLs as `/p/https/host/…`), status, duration and client IP — never
+cookies, tokens or bodies. Render keeps recent logs for free services
+(longer retention and log streaming are paid features).
+
+Deploy/build output is under **Events** → the deploy → **Logs**.
+
+## 10. Restarting and redeploying
+
+* **Restart**: service → **Manual Deploy** → **Restart service** (keeps the
+  current image; takes ~30 s).
+* **Redeploy the same commit**: **Manual Deploy** → **Deploy latest commit**
+  (rebuilds; use **Clear build cache & deploy** if the build looks stale).
+* **Deploy new code**: `git push` to `main` — Render builds, health-checks
+  `/health` and switches traffic with zero downtime.
+* On restart/redeploy Render sends `SIGTERM`; the app finishes in-flight
+  responses and exits (`maxShutdownDelaySeconds: 30`). Being stateless, it
+  needs nothing else: configuration comes from the environment, sessions
+  are ephemeral by design, and `SESSION_SECRET` is preserved by Render so
+  existing cookies stay valid.
+
+## 11. Render free-tier limitations
+
+* **Spin-down after inactivity:** a free web service is suspended after
+  **15 minutes without inbound traffic**. The next request wakes it, which
+  takes **up to ~a minute** (Docker image start + health check). Render's
+  own health checks do not keep it awake. If that delay is unacceptable,
+  upgrade to the Starter plan (always on).
+* **Hours:** 750 free instance hours per month across all free services —
+  enough for one service running continuously, but a second free service
+  would share the budget.
+* **Resources:** 512 MB RAM, 0.1 shared CPU. The image is tuned for this
+  (`NODE_OPTIONS=--max-old-space-size=384`, `MAX_CONCURRENT_UPSTREAM=32`).
+  Very large proxied downloads are streamed, so memory stays flat.
+* **Ephemeral filesystem:** anything written to disk is lost on restart or
+  redeploy, and persistent disks are not available on the free plan —
+  hence `ALLOWLIST_STORAGE=memory` and env-var driven configuration.
+* **Bandwidth:** 100 GB/month outbound included; free services are
+  suspended for the rest of the month if exceeded.
+* **Build minutes:** 500 pipeline minutes/month; each deploy of this image
+  uses about 2–3.
+* **No shell access** on free instances; use the logs and `/health`.
+* Cold starts and shared CPU mean a heavy page can take a few seconds the
+  first time. Keep the allowlist small and treat the service as personal.
+
+## 12. Troubleshooting
 
 | Symptom | What to check |
 |---|---|
-| `deploy.sh` says credentials are missing | §7. `~/.oci/config` must exist with `user`, `tenancy`, `fingerprint`, `key_file`, `region`. |
-| `No Always Free capacity is available` | Not a bug. Re-run later, upgrade to Pay-As-You-Go (stays free), or set `ALLOW_X86_FALLBACK=true`. See §16. |
-| `terraform apply` fails with a 4xx | Permissions: the user needs `manage` on virtual-network-family, instance-family and public-ips in the compartment (root compartment for a personal tenancy is fine). |
-| SSH times out | Security list (`SSH_ALLOWED_CIDR` must include your current IP) and the instance state in the console. |
-| `/health` unreachable from outside, fine on the server | Host firewall: `sudo iptables -S INPUT` must show ACCEPT for 80/443 (cloud-init does this; re-run `sudo /usr/local/sbin/anonview-firewall.sh`). OCI security list must allow 80/443. |
-| HTTPS certificate not issued | DNS A record must point at the server; port 80 **and** 443 must be reachable (ACME); `docker compose logs caddy`. |
-| Website not authorized | Add the domain (and its subdomains with `*.`) in `/admin` or `PROXY_ALLOWED_DOMAINS`. |
+| Build fails on Render | Events → deploy logs. The build only needs `package.json`, `package-lock.json` and `src/`; make sure they are committed. |
+| Deploy stuck on "health check" | Logs tab. Common cause: a configuration error printed at start-up (`SESSION_SECRET` missing, `ADMIN_PASSWORD` shorter than 12 chars or containing a common word, invalid `PROXY_ALLOWED_DOMAINS` entry such as an IP or a port). Fix the variable → Render redeploys. |
+| `/admin` returns 404 | Both `ADMIN_USERNAME` and `ADMIN_PASSWORD` must be set. |
+| First request after a pause is slow | Free-tier spin-down (§11). |
+| Website not authorized | Add the domain (and its subdomains with `*.`) to `PROXY_ALLOWED_DOMAINS`. |
+| A domain added in `/admin` disappeared | Expected on Render (`ALLOWLIST_STORAGE=memory`); put it in `PROXY_ALLOWED_DOMAINS`. |
 | A page looks broken | Its assets may come from an unlisted CDN (allow it) or it relies on WebSockets/service workers (unsupported). |
 | `503 The proxy is busy` | `MAX_CONCURRENT_UPSTREAM` reached — raise it or check for a slow upstream. |
-| High memory / disk | `./deploy.sh status` (CPU, RAM, disk, container stats), `docker system prune`. |
+| `429 Too many requests` for a legitimate user | Raise `RATE_LIMIT`; on Render the limiter keys on `True-Client-IP`. |
+| Out-of-memory restarts | Lower `MAX_RESPONSE_SIZE`/`MAX_CONCURRENT_UPSTREAM`, or move to a larger instance. |
 
-Diagnostics in one go: `./deploy.sh status`.
+Local checks: `npm run check`, then `PORT=10000 NODE_ENV=production
+SESSION_SECRET=<32+ chars> PROXY_ALLOWED_DOMAINS=example.com npm start` and
+`curl http://127.0.0.1:10000/health`.
 
-## 15. Destroying the infrastructure
-
-```bash
-./destroy.sh
-```
-
-It lists every resource in the Terraform state and asks you to type the
-instance name before running `terraform destroy`. This deletes the instance
-**and its boot volume** (including the admin allowlist and TLS certificates
-stored in Docker volumes), the reserved IP and the network. Nothing outside
-the Terraform state is touched. Your OCI account and credentials remain.
-
-## 16. Oracle Always Free limitations
-
-* **ARM (A1) compute:** up to 4 OCPUs and 24 GB RAM in total per tenancy,
-  only in the home region, split across at most 4 instances. This project uses
-  2 OCPU / 12 GB by default (change `INSTANCE_OCPUS`/`INSTANCE_MEMORY_GB`).
-* **Capacity:** A1 hosts are frequently exhausted ("Out of host capacity").
-  Free-tier tenancies are lowest priority; upgrading to Pay As You Go keeps
-  Always Free resources free but gets capacity much more reliably. The
-  deploy script checks capacity first and never loops creating instances.
-* **Other Always Free shapes:** 2 × `VM.Standard.E2.1.Micro` (x86, 1/8 OCPU,
-  1 GB). The image is multi-arch so it runs there (`ALLOW_X86_FALLBACK=true`),
-  with reduced throughput.
-* **Storage:** 200 GB total block storage (boot volumes count); the default
-  50 GB boot volume fits comfortably.
-* **Network:** 10 TB/month outbound; reserved public IPv4 addresses are free.
-* **Idle reclamation:** Oracle may stop Always Free instances that are idle
-  (< 20 % CPU/network for 7 days). A proxy with occasional use may be
-  reclaimed; upgrading to PAYG exempts you. The instance can simply be
-  started again from the console.
-* No SLA; keep the allowlist small and treat it as a personal service.
-
-## 17. ARM64 compatibility
-
-* Runtime: `node:24-alpine` and `caddy:2-alpine` are published for
-  `linux/arm64/v8` and `linux/amd64`; the Dockerfile has no architecture
-  specific steps.
-* Dependencies: the whole tree is pure JavaScript (verified — no `binding.gyp`
-  or `.node` files), so no cross-compilation or native toolchain is needed.
-* The image is built **on the server** for its native architecture, so a
-  Windows/macOS laptop without Docker can deploy. On an x86 fallback instance
-  the same Dockerfile produces an amd64 image.
-* Docker Engine and the Compose plugin are installed from Docker's official
-  Ubuntu repository, which ships arm64 packages.
-
-## 18. Project structure
+## 13. Project structure
 
 ```
 proxy/
 ├── src/
-│   ├── server.js            entry point (env loading, graceful shutdown)
-│   ├── app.js               Fastify app factory, error handler, 404/referer fallback
+│   ├── server.js            entry point (env loading, graceful shutdown on SIGTERM)
+│   ├── app.js               Fastify app factory, error handler, 404/referer fallback, HSTS
 │   ├── config.js            environment parsing & validation
-│   ├── allowlist.js         env + admin-managed allowlist with JSON persistence
+│   ├── allowlist.js         env + admin-managed allowlist (file or memory storage)
 │   ├── sessions.js          in-memory sessions with cookie jars (TTL, LRU)
 │   ├── security/            address policy, hostname rules, safe DNS lookup, target parsing
 │   ├── upstream/            HTTP client, header hygiene, decompression, byte limits
@@ -446,13 +446,12 @@ proxy/
 │   ├── views/               HTML templates (escaping helpers)
 │   └── public/              style.css, homepage JS, favicon, client shim (shim.js)
 ├── test/                    node:test suites + local mock website (helpers/)
-├── Dockerfile, docker-compose.yml, .dockerignore
-├── deploy/caddy/Caddyfile   TLS edge configuration
-├── deploy.sh / destroy.sh   one-command deployment / teardown
-├── deploy.env.example       deployment settings template
-├── infra/
-│   ├── README.md            infrastructure details
-│   ├── terraform/           OCI resources + cloud-init template
-│   └── scripts/             auth check, capacity check, wait-for-ssh, remote deploy/diagnostics, self-test
+├── Dockerfile               multi-stage, non-root, honours $PORT
+├── render.yaml              Render Blueprint (free Docker web service, /health check)
+├── docker-compose.yml       local stack: app + Caddy (development / self-hosting)
+├── deploy/caddy/Caddyfile   Caddy config for the local stack only
 └── .env.example             application settings template
 ```
+
+There is no longer any Oracle Cloud / Terraform code in this repository;
+the local Docker stack and `render.yaml` are the only deployment targets.

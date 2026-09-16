@@ -1,7 +1,7 @@
 {
   "name": "anonview-proxy",
   "version": "1.0.0",
-  "description": "Startpage Anonymous View style allowlisted web proxy with SSRF protection, admin allowlist management and Oracle Cloud deployment automation.",
+  "description": "Startpage Anonymous View style allowlisted web proxy with SSRF protection and admin allowlist management. Deploys to Render as a Docker web service.",
   "private": true,
   "type": "module",
   "main": "src/server.js",

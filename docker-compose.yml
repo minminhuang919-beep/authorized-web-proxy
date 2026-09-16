@@ -1,8 +1,11 @@
-# AnonView proxy — production stack.
+# AnonView proxy — local Docker stack (development / self-hosting).
 #
 #   app    Node.js proxy (non-root, read-only filesystem, internal port only)
-#   caddy  TLS edge: automatic Let's Encrypt certificates, HTTP→HTTPS redirect,
-#          compression, reverse proxy to the app. Only Caddy is published.
+#   caddy  local TLS edge: HTTP on :80 by default; with DOMAIN set, automatic
+#          Let's Encrypt certificates and HTTP→HTTPS redirect.
+#
+# Production hosting uses Render (see render.yaml) which builds the same
+# Dockerfile and terminates TLS itself — Caddy is not used there.
 #
 # Configuration comes from `.env` (copy `.env.example`). Never commit `.env`.
 

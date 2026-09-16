@@ -25,15 +25,22 @@ function fmtDuration(seconds) {
  * @param {Array<{pattern: string, source: string, addedAt: string|null}>} opts.domains
  * @param {object} opts.health output of the health snapshot
  * @param {string} opts.csrfToken
+ * @param {boolean} [opts.ephemeral] admin-added entries live in memory only
  * @param {string} [opts.notice]
  * @param {string} [opts.error]
  */
-export function dashboardPage({ domains, health, csrfToken, notice = '', error = '' }) {
+export function dashboardPage({ domains, health, csrfToken, ephemeral = false, notice = '', error = '' }) {
   const body = html`
 <section class="card">
   <h1>Allowlist</h1>
   <p class="muted">Domains that visitors are allowed to open through the proxy. Entries from the environment
-  (<code>PROXY_ALLOWED_DOMAINS</code>) are locked; entries added here are stored in the data directory and survive restarts.</p>
+  (<code>PROXY_ALLOWED_DOMAINS</code>) are locked.
+  ${
+    ephemeral
+      ? html`<strong>Entries added here are kept in memory only</strong> (<code>ALLOWLIST_STORAGE=memory</code>) and are lost when the
+  service restarts or redeploys — add permanent domains to <code>PROXY_ALLOWED_DOMAINS</code> in your hosting environment.`
+      : html`Entries added here are stored in the data directory and survive restarts.`
+  }</p>
   <p class="form-notice${notice ? '' : ' hidden'}" role="status">${notice}</p>
   <p class="form-error${error ? '' : ' hidden'}" role="alert">${error}</p>
   <form method="post" action="/admin/domains" class="open-row">

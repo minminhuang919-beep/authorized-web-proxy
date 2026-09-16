@@ -97,6 +97,29 @@ export function loadConfig(env = process.env) {
   const connectTimeout = parseInteger(pick(env, 'CONNECT_TIMEOUT', '10'), 'CONNECT_TIMEOUT', { min: 1, max: 120 });
   const transferTimeout = parseInteger(pick(env, 'TRANSFER_TIMEOUT', '300'), 'TRANSFER_TIMEOUT', { min: 1, max: 3600 });
 
+  // TRUST_PROXY: true/false, or the number of reverse-proxy hops in front of
+  // the app (Fastify then uses the address that many hops from the right of
+  // X-Forwarded-For, which clients cannot spoof).
+  const trustProxyRaw = pick(env, 'TRUST_PROXY', 'false');
+  const trustProxy = /^\d+$/.test(String(trustProxyRaw).trim())
+    ? parseInteger(trustProxyRaw, 'TRUST_PROXY', { min: 0, max: 16 })
+    : parseBool(trustProxyRaw, 'TRUST_PROXY');
+
+  // Optional header carrying the real client IP, set by a trusted edge
+  // (e.g. `true-client-ip` on Render / Cloudflare). Used for rate limiting.
+  const clientIpHeader = pick(env, 'CLIENT_IP_HEADER', '').trim().toLowerCase();
+  if (clientIpHeader && !/^[a-z0-9-]+$/.test(clientIpHeader)) {
+    throw new ConfigError('CLIENT_IP_HEADER must be a header name such as true-client-ip');
+  }
+
+  // ALLOWLIST_STORAGE: `file` persists admin-added domains under DATA_DIR;
+  // `memory` keeps them in RAM only (for hosts with an ephemeral filesystem).
+  const allowlistStorage = pick(env, 'ALLOWLIST_STORAGE', 'file').toLowerCase();
+  if (!['file', 'memory'].includes(allowlistStorage)) {
+    throw new ConfigError('ALLOWLIST_STORAGE must be "file" or "memory"');
+  }
+  const dataDir = path.resolve(pick(env, 'DATA_DIR', './data'));
+
   return Object.freeze({
     nodeEnv,
     isProduction,
@@ -104,8 +127,11 @@ export function loadConfig(env = process.env) {
     host: pick(env, 'HOST', '0.0.0.0'),
     port: parseInteger(pick(env, 'PORT', '8080'), 'PORT', { min: 0, max: 65535 }),
     logLevel: pick(env, 'LOG_LEVEL', isTest ? 'silent' : 'info'),
-    trustProxy: parseBool(pick(env, 'TRUST_PROXY', 'false'), 'TRUST_PROXY'),
-    dataDir: path.resolve(pick(env, 'DATA_DIR', './data')),
+    trustProxy,
+    clientIpHeader: clientIpHeader || null,
+    dataDir,
+    allowlistStorage,
+    allowlistFile: allowlistStorage === 'file' ? path.join(dataDir, 'allowlist.json') : null,
 
     allowedDomains: parseList(pick(env, 'PROXY_ALLOWED_DOMAINS', '')),
     unlistedUrlMode,

@@ -1,4 +1,5 @@
-# Caddy configuration for the AnonView proxy.
+# Caddy configuration for the local docker-compose stack (not used on Render,
+# where TLS is terminated by Render's edge).
 #
 # SITE_ADDRESS is set by docker-compose.yml:
 #   - a domain name (e.g. proxy.example.com) → automatic HTTPS via Let's Encrypt,

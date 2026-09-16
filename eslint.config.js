@@ -3,7 +3,7 @@ import globals from 'globals';
 
 export default [
   {
-    ignores: ['node_modules/**', 'data/**', 'coverage/**', 'infra/**', 'src/public/**']
+    ignores: ['node_modules/**', 'data/**', 'coverage/**', 'src/public/**']
   },
   js.configs.recommended,
   {

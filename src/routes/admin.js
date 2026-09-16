@@ -101,6 +101,7 @@ export default async function adminRoutes(app) {
         domains: allowlist.list(),
         health: app.healthSnapshot(),
         csrfToken: session.csrfToken,
+        ephemeral: !allowlist.filePath,
         notice: notice || flash.notice || '',
         error: error || flash.error || ''
       })
