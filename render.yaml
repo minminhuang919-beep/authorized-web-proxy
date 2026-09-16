@@ -16,8 +16,6 @@ services:
     dockerContext: .
     healthCheckPath: /health
     autoDeploy: true
-    # Grace period for in-flight proxied downloads on restart/redeploy (SIGTERM → exit).
-    maxShutdownDelaySeconds: 30
     envVars:
       # ---- runtime (do not change) ------------------------------------------------
       - key: NODE_ENV
