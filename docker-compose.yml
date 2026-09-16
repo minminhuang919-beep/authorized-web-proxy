@@ -1,0 +1,90 @@
+# AnonView proxy — production stack.
+#
+#   app    Node.js proxy (non-root, read-only filesystem, internal port only)
+#   caddy  TLS edge: automatic Let's Encrypt certificates, HTTP→HTTPS redirect,
+#          compression, reverse proxy to the app. Only Caddy is published.
+#
+# Configuration comes from `.env` (copy `.env.example`). Never commit `.env`.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: anonview-proxy:latest
+    container_name: anonview-app
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8080"
+      TRUST_PROXY: "true"
+      DATA_DIR: /data
+    expose:
+      - "8080"
+    volumes:
+      - app_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: anonview-caddy
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # A domain enables automatic HTTPS; without one Caddy serves plain HTTP
+      # on the server IP (testing only).
+      SITE_ADDRESS: ${DOMAIN:-:80}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@${DOMAIN:-localhost}}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - internal
+
+volumes:
+  app_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    driver: bridge

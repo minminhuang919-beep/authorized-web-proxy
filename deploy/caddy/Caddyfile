@@ -1,0 +1,39 @@
+# Caddy configuration for the AnonView proxy.
+#
+# SITE_ADDRESS is set by docker-compose.yml:
+#   - a domain name (e.g. proxy.example.com) → automatic HTTPS via Let's Encrypt,
+#     certificates renewed automatically, HTTP requests redirected to HTTPS;
+#   - ":80" when DOMAIN is empty → plain HTTP on the server IP for testing.
+#
+# Caddy's TLS defaults are modern (TLS 1.2+, strong cipher suites, OCSP
+# stapling), so no manual cipher configuration is needed.
+
+{
+	email {$ACME_EMAIL}
+	admin localhost:2019
+}
+
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	# HSTS only when the request actually arrived over TLS.
+	@https expression `{http.request.scheme} == "https"`
+	header @https Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	header -Server
+
+	reverse_proxy app:8080 {
+		# Stream responses as they arrive (large downloads, progressive HTML).
+		flush_interval -1
+		# Caddy adds X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host
+		# automatically; the app trusts them because TRUST_PROXY=true.
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 60s
+		}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
