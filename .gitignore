@@ -1,0 +1,35 @@
+# Secrets / local configuration — never commit
+.env
+.env.*
+!.env.example
+deploy.env
+!deploy.env.example
+
+# Runtime data (persisted allowlist etc.)
+data/
+
+# Node
+node_modules/
+npm-debug.log*
+coverage/
+.nyc_output/
+
+# Terraform
+infra/terraform/.terraform/
+infra/terraform/.terraform.lock.hcl
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/*.tfvars
+!infra/terraform/terraform.tfvars.example
+infra/terraform/*.tfplan
+infra/terraform/crash.log
+infra/terraform/generated/
+
+# SSH keys that may be generated for deployments
+infra/keys/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
