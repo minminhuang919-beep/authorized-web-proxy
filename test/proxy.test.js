@@ -18,9 +18,12 @@ describe('proxy', () => {
     const res = await get('/');
     assert.equal(res.statusCode, 200);
     assert.match(res.headers['content-type'], /text\/html/);
-    assert.match(res.body, /<form class="search[^"]*" method="get" action="\/open"/);
+    assert.match(res.body, /<form class="search[^"]*" method="get" action="\/search" id="search-form" role="search"/);
     assert.match(res.body, /class="wordmark">AnonView</);
-    assert.match(res.body, /name="url"[^>]*placeholder="Enter a website or URL/);
+    assert.match(res.body, /id="q" name="q" type="text" role="combobox"[^>]*placeholder="Open a configured site or enter an address/, 'no search provider: the box asks for a site');
+    assert.doesNotMatch(res.body, /Enter a URL|Enter a website or URL/);
+    assert.match(res.body, /id="suggestions" role="listbox"/);
+    assert.match(res.body, /data-search-enabled="0"/);
     assert.match(res.body, /Fast private browsing for authorized websites\./);
     assert.match(res.body, /href="\/about"/);
     assert.doesNotMatch(res.body, /href="\/admin"/, 'Admin link hidden for visitors');
@@ -45,14 +48,19 @@ describe('proxy', () => {
     assert.match(res.body, /not on this proxy/);
     res = await get('/open?url=');
     assert.equal(res.statusCode, 400);
-    assert.match(res.body, /enter a web address/i);
+    assert.match(res.body, /enter a website/i);
     assert.match(res.body, /search-box has-error/, 'inline error state on the homepage');
     res = await get('/open?url=http%3A%2F%2F%5Bbad');
     assert.equal(res.statusCode, 400);
+    // /open means "open this address": not an address → invalid, escaped, never a search
     res = await get('/open?url=<script>alert(1)</script>');
     assert.equal(res.statusCode, 400);
     assert.doesNotMatch(res.body, /<script>alert/);
     assert.match(res.body, /&lt;script&gt;/);
+    res = await get('/open?url=geoguessr');
+    assert.equal(res.statusCode, 400, 'a bare word is not turned into a domain');
+    assert.match(res.body, /valid domain name/);
+    assert.doesNotMatch(res.body, /geoguessr\.com|not authorized/i);
   });
 
   test('a valid authorized page is fetched and rewritten', async () => {

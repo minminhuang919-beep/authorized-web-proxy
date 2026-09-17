@@ -14,8 +14,8 @@ const SIZE_RE = /^(\d+(?:\.\d+)?)\s*([kmg]?)b?$/i;
 const SIZE_MULT = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 };
 
 export class ConfigError extends Error {
-  constructor(message) {
-    super(message);
+  constructor(message, options) {
+    super(message, options);
     this.name = 'ConfigError';
   }
 }
@@ -54,6 +54,15 @@ function parseList(value) {
 function pick(env, name, fallback) {
   const v = env[name];
   return v === undefined || v === '' ? fallback : v;
+}
+
+function isHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -134,6 +143,31 @@ export function loadConfig(env = process.env) {
   }
   const dataDir = path.resolve(pick(env, 'DATA_DIR', './data'));
 
+  // Web search for the homepage box: off unless SEARCH_PROVIDER is set.
+  // Provider-specific settings are validated here so a typo fails at start-up.
+  const searchProvider = pick(env, 'SEARCH_PROVIDER', 'none').trim().toLowerCase();
+  if (!['none', 'searxng', 'brave', 'google', 'proxy'].includes(searchProvider)) {
+    throw new ConfigError('SEARCH_PROVIDER must be one of: none, searxng, brave, google, proxy');
+  }
+  const searchUrl = pick(env, 'SEARCH_URL', '').trim();
+  const searchApiKey = pick(env, 'SEARCH_API_KEY', '').trim();
+  const searchEngineId = pick(env, 'SEARCH_ENGINE_ID', '').trim();
+  if (searchUrl && !isHttpUrl(searchUrl.replaceAll('{q}', 'q'))) {
+    throw new ConfigError('SEARCH_URL must be an http:// or https:// URL');
+  }
+  if (searchProvider === 'searxng' && !searchUrl) {
+    throw new ConfigError('SEARCH_URL (the base URL of the SearXNG instance) is required when SEARCH_PROVIDER=searxng');
+  }
+  if ((searchProvider === 'brave' || searchProvider === 'google') && !searchApiKey) {
+    throw new ConfigError(`SEARCH_API_KEY is required when SEARCH_PROVIDER=${searchProvider}`);
+  }
+  if (searchProvider === 'google' && !searchEngineId) {
+    throw new ConfigError('SEARCH_ENGINE_ID (the Programmable Search Engine id, "cx") is required when SEARCH_PROVIDER=google');
+  }
+  if (searchProvider === 'proxy' && (!searchUrl || !searchUrl.includes('{q}'))) {
+    throw new ConfigError('SEARCH_URL must be a URL template containing {q} when SEARCH_PROVIDER=proxy, e.g. https://duckduckgo.com/html/?q={q}');
+  }
+
   return Object.freeze({
     nodeEnv,
     isProduction,
@@ -149,6 +183,17 @@ export function loadConfig(env = process.env) {
     allowlistFile: adminStorage === 'file' ? path.join(dataDir, 'allowlist.json') : null,
     blacklistFile: adminStorage === 'file' ? path.join(dataDir, 'blacklist.json') : null,
     blacklistEnv: pick(env, 'PROXY_BLACKLIST', ''),
+    sitesFile: adminStorage === 'file' ? path.join(dataDir, 'sites.json') : null,
+    sitesEnv: pick(env, 'PROXY_SITES', ''),
+
+    search: Object.freeze({
+      provider: searchProvider,
+      url: searchUrl,
+      apiKey: searchApiKey,
+      engineId: searchEngineId,
+      timeoutMs: parseInteger(pick(env, 'SEARCH_TIMEOUT', '10'), 'SEARCH_TIMEOUT', { min: 1, max: 60 }) * 1000,
+      rateLimit: parseInteger(pick(env, 'SEARCH_RATE_LIMIT', '60'), 'SEARCH_RATE_LIMIT', { min: 1, max: 100_000 })
+    }),
 
     allowedDomains: parseList(pick(env, 'PROXY_ALLOWED_DOMAINS', '')),
     unlistedUrlMode,

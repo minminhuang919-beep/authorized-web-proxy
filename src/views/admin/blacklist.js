@@ -64,7 +64,7 @@ export function blacklistPage({ entries, total, q, persistent, exportValue, csrf
                 ${
                   e.source === 'env'
                     ? html`<span class="muted small">locked</span>`
-                    : html`<form method="post" action="/admin/blacklist/${e.id}/delete" class="inline-form" data-confirm="Remove ${e.domain} from the blacklist? Visitors will be able to open it again." data-entry-id="${e.id}">
+                    : html`<form method="post" action="/admin/blacklist/${e.id}/delete" class="inline-form" data-confirm="Remove ${e.domain} from the blacklist? Visitors will be able to open it again." data-api-url="/admin/blacklist/${e.id}">
                       <input type="hidden" name="_csrf" value="${csrfToken}">
                       <button type="submit" class="btn btn-danger btn-sm">Delete</button>
                     </form>`

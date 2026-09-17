@@ -90,6 +90,19 @@ export class ServiceBusyError extends ProxyError {
   }
 }
 
+/** The configured search provider failed or is not configured. */
+export class SearchUnavailableError extends ProxyError {
+  constructor(message = 'Search is temporarily unavailable. Please try again in a moment.') {
+    super('SEARCH_UNAVAILABLE', 502, message);
+  }
+}
+
+export class SearchTimeoutError extends ProxyError {
+  constructor() {
+    super('SEARCH_TIMEOUT', 504, 'The search provider took too long to respond.');
+  }
+}
+
 /** Errors thrown by the custom DNS lookup (never shown verbatim). */
 export class LookupBlockedError extends Error {
   constructor(hostname, address) {

@@ -12,6 +12,8 @@ const TITLES = {
   REQUEST_TOO_LARGE: 'Request too large',
   RATE_LIMITED: 'Too many requests',
   BUSY: 'Proxy busy',
+  SEARCH_UNAVAILABLE: 'Search unavailable',
+  SEARCH_TIMEOUT: 'Search timed out',
   NOT_FOUND: 'Page not found',
   CSRF: 'Form expired',
   INTERNAL: 'Something went wrong'

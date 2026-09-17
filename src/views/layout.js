@@ -53,6 +53,15 @@ export const icons = {
   arrow: raw(
     '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
   ),
+  arrowLeft: raw(
+    '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 12H5M11 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+  ),
+  globe: raw(
+    '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>'
+  ),
+  bolt: raw(
+    '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>'
+  ),
   sun: raw(
     '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
   ),
@@ -83,7 +92,7 @@ export const icons = {
  * @param {Raw|string} opts.body
  * @param {string} [opts.description]
  * @param {'site'|'admin'} [opts.nav]   which navigation to show
- * @param {string} [opts.active]        active nav item (`home`, `about`, `dashboard`, `blacklist`, `settings`)
+ * @param {string} [opts.active]        active nav item (`home`, `about`, `dashboard`, `sites`, `blacklist`, `settings`)
  * @param {boolean} [opts.adminLoggedIn] show the Admin link / logout
  * @param {string|null} [opts.csrfToken] renders the logout form when set
  * @param {string} [opts.bodyClass]
@@ -91,7 +100,7 @@ export const icons = {
 export function layout({ title, body, description = 'Fast private browsing for authorized websites.', nav = 'site', active = '', adminLoggedIn = false, csrfToken = null, bodyClass = '' }) {
   const link = (href, label, key) => `<a href="${href}"${active === key ? ' aria-current="page" class="is-active"' : ''}>${esc(label)}</a>`;
   const siteLinks = [link('/', 'Home', 'home'), link('/about', 'About', 'about'), adminLoggedIn ? link('/admin', 'Admin', 'admin') : ''].join('');
-  const adminLinks = [link('/admin', 'Dashboard', 'dashboard'), link('/admin/blacklist', 'Blacklist', 'blacklist'), link('/admin/settings', 'Settings', 'settings'), link('/', 'Site', 'site')].join('');
+  const adminLinks = [link('/admin', 'Dashboard', 'dashboard'), link('/admin/sites', 'Sites', 'sites'), link('/admin/blacklist', 'Blacklist', 'blacklist'), link('/admin/settings', 'Settings', 'settings'), link('/', 'Site', 'site')].join('');
   const logout = csrfToken
     ? `<form method="post" action="/admin/logout" class="inline-form"><input type="hidden" name="_csrf" value="${esc(csrfToken)}"><button type="submit" class="btn btn-ghost btn-sm">Log out</button></form>`
     : '';

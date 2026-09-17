@@ -26,7 +26,19 @@ try {
   throw err;
 }
 
-const app = await buildApp({ config });
+// Building the app validates the environment-defined lists (authorized
+// scope, blacklist, site shortcuts, search provider) — report those as
+// configuration errors too instead of a stack trace.
+let app;
+try {
+  app = await buildApp({ config });
+} catch (err) {
+  if (err instanceof ConfigError) {
+    console.error(`Configuration error: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
 
 if (config.generatedSessionSecret) {
   app.log.warn('SESSION_SECRET is not set: using a random secret for this run (sessions will not survive a restart)');

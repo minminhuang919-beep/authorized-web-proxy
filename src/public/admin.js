@@ -36,17 +36,18 @@
     return field ? field.value : '';
   }
 
-  // Blacklist rows are removed through the JSON API (DELETE) when possible so
-  // the page does not reload; other forms submit normally after confirmation.
+  // Rows with a JSON API endpoint (blacklist, site directory) are removed
+  // through DELETE when possible so the page does not reload; other forms
+  // submit normally after confirmation.
   function performDelete(form) {
-    var id = form.getAttribute('data-entry-id');
-    if (!id || !window.fetch) {
+    var api = form.getAttribute('data-api-url');
+    if (!api || !window.fetch) {
       form.submit();
       return;
     }
     var button = form.querySelector('button');
     if (button) button.setAttribute('disabled', 'disabled');
-    fetch('/admin/blacklist/' + encodeURIComponent(id), {
+    fetch(api, {
       method: 'DELETE',
       headers: { 'x-csrf-token': csrfOf(form), accept: 'application/json' },
       credentials: 'same-origin'

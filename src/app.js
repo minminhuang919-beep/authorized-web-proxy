@@ -16,7 +16,9 @@ import { ProxyError, TooManyRequestsError } from './errors.js';
 import { createAccessPolicy } from './policy.js';
 import { loggerOptions, safePath } from './logger.js';
 import { createUrlRewriter } from './rewrite/url.js';
+import { createSearchProvider } from './search/index.js';
 import { SessionStore } from './sessions.js';
+import { SiteDirectory } from './sites.js';
 import { createUpstreamClient } from './upstream/client.js';
 import { errorJson, errorPage } from './views/error.js';
 import { tryRefererFallback } from './routes/fallback.js';
@@ -33,6 +35,8 @@ const pkg = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.
  * @param {(address: string) => boolean} [opts.deps.isAddressAllowed]
  * @param {{ http: number, https: number }} [opts.deps.defaultPorts]
  * @param {Allowlist} [opts.deps.allowlist]
+ * @param {SiteDirectory} [opts.deps.sites]
+ * @param {typeof fetch} [opts.deps.fetch] fetch used for search API providers (tests)
  * @param {object} [opts.deps.logger] Fastify logger option override
  */
 export async function buildApp({ config, deps = {} }) {
@@ -69,6 +73,22 @@ export async function buildApp({ config, deps = {} }) {
   const policy = createAccessPolicy({ allowlist, blacklist });
   const audit = new AuditLog({ max: 50 });
 
+  // Shortcuts (site directory). Destinations are validated against the
+  // policy on every use; entries that drifted out of it are only flagged here.
+  const sites =
+    deps.sites ??
+    (await new SiteDirectory({
+      envValue: config.sitesEnv,
+      filePath: config.sitesFile, // null → in-memory only (ephemeral hosts)
+      policy,
+      logger: app.log
+    }).load());
+  for (const entry of sites.list()) {
+    if (entry.status !== 'ok') app.log.warn({ shortcut: entry.shortcut, host: entry.host, status: entry.status }, 'site shortcut is not currently usable');
+  }
+
+  const search = createSearchProvider({ config, policy, logger: app.log, fetchImpl: deps.fetch });
+
   const sessions = new SessionStore({ ttlMs: config.sessionTtlMs, max: config.sessionMax });
   sessions.start();
 
@@ -87,6 +107,8 @@ export async function buildApp({ config, deps = {} }) {
   app.decorate('allowlist', allowlist);
   app.decorate('blacklist', blacklist);
   app.decorate('policy', policy);
+  app.decorate('sites', sites);
+  app.decorate('search', search);
   app.decorate('audit', audit);
   app.decorate('sessions', sessions);
   app.decorate('upstream', upstream);
@@ -102,6 +124,8 @@ export async function buildApp({ config, deps = {} }) {
       platform: `${process.platform}/${process.arch}`,
       allowlist: { size: allowlist.size, persistent: Boolean(allowlist.filePath) },
       blacklist: { size: blacklist.size, persistent: blacklist.persistent },
+      sites: { size: sites.size, enabled: sites.enabledCount, persistent: sites.persistent },
+      search: { provider: search.kind, enabled: search.enabled },
       sessions: sessions.stats(),
       upstream: { ...upstream.stats },
       memory: { rss: mem.rss, heapUsed: mem.heapUsed, heapTotal: mem.heapTotal }

@@ -1,10 +1,12 @@
 # AnonView — an allowlisted “Anonymous View” web proxy
 
 AnonView is a small, production-grade web proxy in the spirit of Startpage's
-*Anonymous View*: you type a web address, the **server** fetches the page and
-shows it to you, so the website sees the proxy's IP address instead of yours.
-Links, images, stylesheets, forms and most scripts keep working because every
-URL is rewritten to go back through the proxy.
+*Anonymous View*: you type a website — a configured shortcut such as
+`google`, an address such as `example.com`, or a search query — the
+**server** fetches the page and shows it to you, so the website sees the
+proxy's IP address instead of yours. Links, images, stylesheets, forms and
+most scripts keep working because every URL is rewritten to go back through
+the proxy.
 
 It is deliberately **not** an open proxy: only websites inside the
 administrator's **authorized scope** can be opened, the administrator can
@@ -24,7 +26,7 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
 2. [Architecture](#2-architecture)
 3. [Local development](#3-local-development)
 4. [Environment variables](#4-environment-variables)
-5. [Authorized scope and blacklist](#5-authorized-scope-and-blacklist)
+5. [Authorized scope and blacklist](#5-authorized-scope-and-blacklist) · [site shortcuts](#site-shortcuts-the-site-directory) · [web search](#web-search)
 6. [Security model](#6-security-model)
 7. [Deploying to Render](#7-deploying-to-render)
 8. [Custom domain and HTTPS](#8-custom-domain-and-https)
@@ -38,13 +40,29 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
 
 ## 1. What it does
 
-* **Search-engine style homepage**: a large centred address box. Enter
-  `example.com/page` (the `https://` is optional) and press *Open*. A
-  progress bar and button spinner show while the page is being fetched.
-* The proxy validates and normalises the address, checks the **authorized
-  scope**, then the **blacklist**, then fetches it server-side over HTTP/HTTPS
-  (SSRF address checks run on the resolved addresses) and streams it back to
-  you under `https://your-proxy/p/https/example.com/page`.
+* **Search-engine style homepage**: one large centred box that understands
+  three kinds of input —
+  * a **shortcut** configured by the administrator (`google`, `youtube`,
+    `wikipedia` — no `https://`, `www.` or `.com` needed; matching ignores
+    case), which opens the configured destination through the proxy;
+  * a **website address** (`example.com/page`, `https://example.com`; the
+    `https://` is optional), opened through the proxy;
+  * anything else (`geoguessr`, `weather today`, `best hockey drills`) is a
+    **web search**, answered on a results page by the search provider the
+    administrator configured (`SEARCH_PROVIDER`; search is off by default).
+    A bare word is never turned into a domain — `geoguessr` is a search, not
+    `geoguessr.com`.
+
+  The box says *Search the web or open a configured site*. While typing, it
+  suggests matching shortcuts (keyboard navigable) next to a *Search for …*
+  entry; the configured shortcuts are also shown as chips under the box. A
+  progress bar and button spinner show while a page is being fetched.
+* Whether typed or behind a shortcut, every destination is validated and
+  normalised, checked against the **authorized scope**, then the
+  **blacklist**, then fetched server-side over HTTP/HTTPS (SSRF address checks
+  run on the resolved addresses) and streamed back to you under
+  `https://your-proxy/p/https/example.com/page` — the address bar stays on
+  the proxy.
 * HTML and CSS are rewritten on the fly so that navigation, images, fonts,
   stylesheets, forms, iframes and `srcset` images stay inside the proxy.
   Scripts are relayed unchanged; a small client-side shim keeps
@@ -58,9 +76,11 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
 * Redirects are re-validated against the allowlist before the browser is
   allowed to follow them.
 * A protected **admin area** (`/admin`) with a dashboard (counts, proxy
-  status, recent configuration changes), a **Blacklist** page (add / search /
-  delete with confirmation, reasons, timestamps, JSON API) and a **Settings**
-  page (authorized scope, running configuration).
+  status, recent configuration changes), a **Sites** page (the shortcut
+  directory: add / edit / enable / disable / delete / search, with each
+  destination's live scope and blacklist status, JSON API), a **Blacklist**
+  page (add / search / delete with confirmation, reasons, timestamps, JSON
+  API) and a **Settings** page (authorized scope, running configuration).
 * Light and dark themes (follows the system, with a manual toggle), fully
   keyboard accessible, responsive down to phone widths.
 * `/health` returns a JSON status for monitoring and for Render's health check.
@@ -83,6 +103,18 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
                     ▼
             allowlisted websites
 ```
+
+Request flow for the search box (`GET /search?q=…`):
+
+0. `src/resolve.js` classifies the input, in this order: a configured,
+   enabled shortcut (`src/sites.js`) → its destination; an explicit URL →
+   that address; something that clearly looks like a domain (`example.com`)
+   → `https://` + that address; anything else (a bare word such as
+   `geoguessr`, a phrase) → a search query — never a guessed domain. Shortcut
+   destinations and typed addresses go through exactly the same validation
+   (`src/security/target.js`: http/https only, named host, no port or
+   credentials, authorized scope, blacklist) and are redirected into
+   `/p/…`. Queries go to the configured search provider (`src/search/`).
 
 Request flow for `GET /p/https/example.com/a`:
 
@@ -115,7 +147,7 @@ npm install
 cp .env.example .env          # edit PROXY_ALLOWED_DOMAINS, ADMIN_* …
 npm run dev                   # http://localhost:8080 with pretty logs (auto-reload)
 
-npm test                      # 116 tests against a local mock website (no network needed)
+npm test                      # 172 tests against local mock website + search API (no network needed)
 npm run hash-password         # print an scrypt hash for ADMIN_PASSWORD_HASH
 npm run lint                  # ESLint
 npm run check                 # lint + test
@@ -134,9 +166,9 @@ cp .env.example .env
 docker compose up --build     # http://localhost  (Caddy on :80; with DOMAIN set, HTTPS via Let's Encrypt)
 ```
 
-Admin-added scope entries and blacklist entries are persisted in the
-`app_data` volume (`ADMIN_STORAGE=file`, the default). Caddy is only part of
-the local stack; Render provides TLS itself.
+Admin-added scope entries, blacklist entries and shortcuts are persisted in
+the `app_data` volume (`ADMIN_STORAGE=file`, the default). Caddy is only part
+of the local stack; Render provides TLS itself.
 
 ## 4. Environment variables
 
@@ -153,6 +185,13 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 | `CLIENT_IP_HEADER` | *(empty)* | Header set by a trusted edge with the real client IP, used for rate limiting (`true-client-ip` on Render). |
 | `PROXY_ALLOWED_DOMAINS` | *(empty)* | The **authorized scope**, comma-separated, e.g. `example.com,*.example.com`. |
 | `PROXY_BLACKLIST` | *(empty)* | Blacklisted domains inside the scope, comma-separated, optional `\|reason`: `ads.example.com\|Not permitted,tracker.example`. |
+| `PROXY_SITES` | *(empty)* | Permanent **site shortcuts**, comma-separated `shortcut=destination\|Name\|Description` (name/description optional, leading `!` = disabled): `google=https://google.com\|Google\|Google Search,yt=https://youtube.com\|YouTube`. Destinations must be inside the scope. |
+| `SEARCH_PROVIDER` | `none` | Web search backend for the homepage box: `none` (off), `searxng`, `brave`, `google` or `proxy`. See §5. |
+| `SEARCH_URL` | *(empty)* | `searxng`: base URL of the instance. `proxy`: URL template with `{q}` whose host is in the scope. `brave`/`google`: optional endpoint override. |
+| `SEARCH_API_KEY` | *(empty)* | API key for `brave` / `google`. Never displayed or logged. |
+| `SEARCH_ENGINE_ID` | *(empty)* | `google`: the Programmable Search Engine id (`cx`). |
+| `SEARCH_TIMEOUT` | `10` | Seconds to wait for the search provider. |
+| `SEARCH_RATE_LIMIT` | `60` | Searches per client IP per `RATE_LIMIT_WINDOW` (protects API quotas). |
 | `PROXY_UNLISTED_URL_MODE` | `direct` | `direct`: links to unlisted domains stay direct; `proxy`: route them through the proxy (they get a "not authorized" page). |
 | `PROXY_SHOW_ALLOWLIST` | `true` | Show the allowed domains on the homepage. |
 | `PROXY_BANNER` | `true` | Inject the slim "viewing through AnonView" bar into proxied pages. |
@@ -169,7 +208,7 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 | `TRANSFER_TIMEOUT` | `300` | Hard cap on the duration of one proxied response. |
 | `MAX_CONCURRENT_UPSTREAM` | `64` | In-flight upstream requests across all visitors (503 beyond). |
 | `ADMIN_STORAGE` | `file` | Where admin-managed data lives: `file` = JSON under `DATA_DIR`; `memory` = RAM only (Render — ephemeral disk). `ALLOWLIST_STORAGE` is accepted as an alias. |
-| `DATA_DIR` | `./data` | Directory for `allowlist.json` / `blacklist.json` when `ADMIN_STORAGE=file`. |
+| `DATA_DIR` | `./data` | Directory for `allowlist.json` / `blacklist.json` / `sites.json` when `ADMIN_STORAGE=file`. |
 | `DOMAIN`, `ACME_EMAIL` | *(empty)* | Local docker-compose + Caddy only. Ignored on Render. |
 
 `.env` is git-ignored; never commit it. `.env.example` documents every key.
@@ -232,6 +271,85 @@ kept only as an scrypt hash.
   links (your browser would contact those sites directly if you follow them).
   Set `proxy` to have them blocked instead.
 
+### Site shortcuts (the site directory)
+
+A shortcut is a name visitors can type instead of an address:
+
+```
+google     →  https://google.com/      (configured by the administrator)
+youtube    →  https://youtube.com/
+wikipedia  →  https://wikipedia.org/
+```
+
+Shortcuts are **not** built in — nothing is reachable by name until the
+administrator creates it, on the admin **Sites** page or in `PROXY_SITES`.
+A shortcut is a convenience, never an authorization:
+
+* Every destination is validated **when it is saved** with exactly the rules
+  a typed address gets: `http`/`https` only, a domain name (never an IP
+  literal, `localhost`, a private/special-use name, a port or credentials),
+  inside the authorized scope and not blacklisted. `google → http://127.0.0.1`,
+  `google → http://localhost`, a private address or a domain outside the scope
+  are all refused with a clear message.
+* It is validated **again every time it is used** — scope, blacklist, then the
+  SSRF address checks at connection time and redirect re-validation, like any
+  other request. If a destination is blacklisted or de-authorized later, the
+  Sites page flags it (*Blacklisted* / *Not authorized*), it disappears from
+  the homepage and the suggestions, and using it shows the usual blocked /
+  not-authorized page.
+* Shortcut names are 1–32 characters — letters, digits, `-` and `_` (no dots,
+  so a shortcut can never be confused with a domain) — matched
+  **case-insensitively**: `Google`, `google` and `GOOGLE` are the same
+  shortcut. Duplicates are refused.
+* Entries can be enabled/disabled; a disabled shortcut is simply not a
+  shortcut (the word is searched for instead). `PROXY_SITES` entries are
+  locked (edit the environment); admin-created ones are editable.
+
+How the box decides what you meant (`src/resolve.js`), in this fixed order:
+
+| Priority | You type | Treated as |
+|---|---|---|
+| A | `google` — exactly a configured, enabled shortcut (case-insensitive) | the shortcut's destination, validated |
+| B | `https://example.com/x`, `http://…`, `//host/x` | that explicit address, validated |
+| C | `example.com`, `example.co.uk`, `sub.example.com/x` — clearly a domain (a valid hostname with an alphabetic top-level label) | `https://` + the address, validated |
+| — | `127.0.0.1`, `[::1]`, `localhost:3000`, `example.com:8080` | an address the proxy refuses — you get the explanation, not a search |
+| D | `geoguessr`, `randomword`, `weather today`, `GCSE physics`, `e.g`, `v1.2`, a disabled shortcut | a web search |
+
+A bare word is **never** turned into a domain: `geoguessr` is a search, not
+`geoguessr.com`, and can never produce the "Website not authorized" page.
+Only a configured shortcut opens a site by name.
+
+### Web search
+
+Anything that is not a shortcut or an address is a **search query**. Search
+is **off by default**: the results page then explains that no provider is
+configured and offers the shortcuts instead. The administrator chooses a
+backend with `SEARCH_PROVIDER` — no search engine is ever scraped:
+
+| `SEARCH_PROVIDER` | What it does | Settings |
+|---|---|---|
+| `none` | Search off (default). | — |
+| `searxng` | Queries a [SearXNG](https://docs.searxng.org/) instance's JSON API and renders the results page. Enable `json` under `search.formats` in its `settings.yml`. The instance may live on a private network (e.g. `http://searxng:8080` next to the app in docker-compose). | `SEARCH_URL` = base URL |
+| `brave` | [Brave Search API](https://brave.com/search/api/) web results. | `SEARCH_API_KEY` |
+| `google` | [Google Programmable Search JSON API](https://developers.google.com/custom-search/v1/overview). | `SEARCH_API_KEY`, `SEARCH_ENGINE_ID` (the engine's `cx`) |
+| `proxy` | No API: the query is opened on a search **website** through the proxy itself, like any other page (Startpage-style). The website's host must be in the authorized scope and its terms apply. | `SEARCH_URL` = template with `{q}`, e.g. `https://duckduckgo.com/html/?q={q}` |
+
+On the built-in results page nothing is proxied automatically: every result
+links to `/open?url=…` on the proxy's own origin, so a click runs the normal
+chain — authorized scope → blacklist → SSRF checks at connection time — and
+either opens the page through the proxy or shows the secure *Website not
+authorized* / *Website unavailable* page. The badge next to each result
+(*via proxy*, *not authorized*, *blocked*) only predicts that outcome from
+the current policy. Results never link out directly. Titles and snippets are
+reduced to plain text.
+The API providers are called with a plain `fetch()` (the endpoint is
+operator configuration, like a database URL, so it may be a private
+address); the visitor's query only ever travels URL-encoded in the query
+string. Searches have their own per-IP limit (`SEARCH_RATE_LIMIT`) so a
+visitor cannot burn through an API quota, and a timeout (`SEARCH_TIMEOUT`).
+Provider errors show a generic "search unavailable" page; details go to the
+log only. API keys never appear in pages or logs.
+
 ## 6. Security model
 
 **Not an open proxy / SSRF surface**
@@ -252,6 +370,19 @@ kept only as an scrypt hash.
   A host whose answer mixes public and private addresses is refused entirely.
 * Redirects (`Location`) are resolved and re-validated; redirects to unlisted
   or private destinations are stopped with an explanatory page.
+* Shortcuts cannot weaken any of this: a destination is validated with the
+  same rules when an administrator saves it *and* on every use, so a
+  shortcut can never resolve to `127.0.0.1`, `localhost`, a private address,
+  a port, or a domain outside the scope, and the SSRF, redirect, rate and
+  size limits apply to the resulting request exactly as to a typed one.
+  Only administrator-configured, enabled, currently-usable shortcuts are
+  ever exposed by the homepage and `/suggest`.
+* Web search is opt-in (`SEARCH_PROVIDER`), rate-limited per client, uses
+  documented JSON APIs or the proxy itself (never scraping), reduces results
+  to plain text and http(s) URLs, and never links out: every result opens
+  through `/open`, i.e. through the same authorization → blacklist → SSRF
+  chain as a typed address. A bare word typed into the box is a search, never
+  a guessed domain.
 * Connect, header, idle and total-transfer timeouts; maximum response and
   request sizes; a cap on concurrent upstream requests; per-IP rate limiting
   (stricter for admin login), keyed on Render's `True-Client-IP` header so a
@@ -286,22 +417,31 @@ kept only as an scrypt hash.
 * Container: non-root user (uid 1000), production-only dependencies, memory
   cap sized for Render's free instance; no secrets in the image or repo.
 
-See `test/ssrf.test.js`, `test/blacklist.test.js` and `test/render.test.js`
-for the executable version of these guarantees.
+See `test/ssrf.test.js`, `test/blacklist.test.js`, `test/sites.test.js`,
+`test/search.test.js`, `test/routing.test.js` and `test/render.test.js` for
+the executable version of these guarantees.
 
 ### Admin area
 
 Sign in at `/admin/login` (the *Admin* link appears in the navigation once you
 are signed in). Sections:
 
-* **Dashboard** — number of blacklisted domains, size of the authorized scope,
-  proxy health, uptime, service statistics and the recent configuration
-  changes made through the UI.
+* **Dashboard** — number of shortcuts and blacklisted domains, size of the
+  authorized scope, proxy health, uptime, service statistics, the search
+  provider in use and the recent configuration changes made through the UI.
+* **Sites** — the shortcut directory: create entries (name, shortcut,
+  destination, optional description), edit them, enable/disable, delete with
+  a confirmation dialog, search/filter the table (name, shortcut, domain,
+  description), see each destination and whether it is currently
+  *Blacklisted* or *Not authorized*, and export the directory as a
+  `PROXY_SITES` value. Duplicate shortcuts are refused; every destination is
+  validated before it is saved.
 * **Blacklist** — add a domain with an optional reason, search/filter the
   table (domain or reason), see when each entry was added, delete with a
   confirmation dialog, export the list as a `PROXY_BLACKLIST` value.
 * **Settings** — manage the authorized scope and view the running
-  configuration (read-only; values come from the environment).
+  configuration (read-only; values come from the environment; API keys are
+  shown only as "set").
 
 JSON API (same session cookie, plus `x-csrf-token` taken from the page):
 
@@ -309,6 +449,24 @@ JSON API (same session cookie, plus `x-csrf-token` taken from the page):
 GET    /admin/blacklist            Accept: application/json  → { entries, total, persistent }
 POST   /admin/blacklist            { "domain": "ads.example.com", "reason": "Not permitted" } → 201 { entry }
 DELETE /admin/blacklist/:id        → 200 { ok, entry } | 404 | 403 (environment entry)
+
+GET    /admin/sites                Accept: application/json  → { entries, total, enabled, persistent }
+POST   /admin/sites                { "name": "Google", "shortcut": "google", "destination": "https://google.com",
+                                     "description": "Google Search", "enabled": true } → 201 { entry }
+                                   400 INVALID_SHORTCUT | INVALID_DESTINATION | DESTINATION_NOT_AUTHORIZED |
+                                       DESTINATION_BLACKLISTED, 409 DUPLICATE
+PATCH  /admin/sites/:id            any subset of the fields above (PUT is accepted too) → 200 { entry }
+DELETE /admin/sites/:id            → 200 { ok, entry } | 404 | 403 (environment entry)
+```
+
+Public, unauthenticated endpoints used by the search box:
+
+```
+GET /search?q=<input>[&page=N][&mode=search]   shortcut/address → 302 into the proxy; query → results page
+GET /open?url=<input>                           "open this": a shortcut or an address → 302 into the proxy (or the
+                                                403 page); a bare word is an invalid address here — never a search,
+                                                never a guessed domain. Used by result links and the About page.
+GET /suggest?q=<prefix>                         → { query, sites: [{ name, shortcut, host, description }], search }
 ```
 
 ## 7. Deploying to Render
@@ -375,12 +533,20 @@ Predefined by `render.yaml` (change in the *Environment* tab if needed):
 `ADMIN_RATE_LIMIT=10`, `MAX_RESPONSE_SIZE=20m`, `MAX_REQUEST_SIZE=2m`,
 `REQUEST_TIMEOUT=30`, `CONNECT_TIMEOUT=10`, `TRANSFER_TIMEOUT=300`,
 `MAX_CONCURRENT_UPSTREAM=32`, `PROXY_UNLISTED_URL_MODE=direct`,
-`PROXY_SHOW_ALLOWLIST=true`, `PROXY_BANNER=true`.
+`PROXY_SHOW_ALLOWLIST=true`, `PROXY_BANNER=true`, `SEARCH_PROVIDER=none`,
+`SEARCH_TIMEOUT=10`, `SEARCH_RATE_LIMIT=60`.
 
-Optional variables you can add in the *Environment* tab: `PROXY_BLACKLIST`
-(permanent blacklist entries, format `domain|reason,domain2`) and
-`ADMIN_PASSWORD_HASH` (use it instead of `ADMIN_PASSWORD`; generate with
-`npm run hash-password`).
+Optional variables you can add in the *Environment* tab:
+
+* `PROXY_SITES` — permanent site shortcuts (format
+  `shortcut=destination|Name|Description,…`; the admin *Sites* page exports
+  this value). Their domains must also be in `PROXY_ALLOWED_DOMAINS`.
+* `PROXY_BLACKLIST` — permanent blacklist entries, format
+  `domain|reason,domain2`.
+* `SEARCH_PROVIDER` + `SEARCH_URL` / `SEARCH_API_KEY` / `SEARCH_ENGINE_ID` —
+  turn on web search (see §5); keep API keys in the Environment tab only.
+* `ADMIN_PASSWORD_HASH` — use it instead of `ADMIN_PASSWORD`; generate with
+  `npm run hash-password`.
 
 Changing any variable triggers an automatic redeploy.
 
@@ -497,7 +663,11 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 | Deploy stuck on "health check" | Logs tab. Common cause: a configuration error printed at start-up (`SESSION_SECRET` missing, `ADMIN_PASSWORD` shorter than 12 chars or containing a common word, invalid `PROXY_ALLOWED_DOMAINS` entry such as an IP or a port). Fix the variable → Render redeploys. |
 | `/admin` returns 404 | `ADMIN_USERNAME` and `ADMIN_PASSWORD` (or `ADMIN_PASSWORD_HASH`) must be set. |
 | A blacklisted site still opens | Check the scope/blacklist order: only hosts inside the scope reach the blacklist; entries cover subdomains, so `example.com` also blocks `www.example.com`. |
-| A domain added in `/admin` disappeared | Expected on Render (`ADMIN_STORAGE=memory`); export it to `PROXY_BLACKLIST` / `PROXY_ALLOWED_DOMAINS`. |
+| A domain added in `/admin` disappeared | Expected on Render (`ADMIN_STORAGE=memory`); export it to `PROXY_BLACKLIST` / `PROXY_ALLOWED_DOMAINS` (shortcuts: `PROXY_SITES`). |
+| Typing `google` searches instead of opening the site | No enabled shortcut named `google` exists (or its destination is blacklisted / outside the scope — see the status column on the *Sites* page). |
+| "Web search isn't set up yet" | Set `SEARCH_PROVIDER` (and its `SEARCH_*` settings); restart. `proxy` mode needs the search website's host in `PROXY_ALLOWED_DOMAINS`. |
+| "Search is unavailable right now" | Logs show the provider's HTTP status: wrong `SEARCH_URL`/API key, SearXNG without `json` in `search.formats`, quota exhausted (429), or a timeout (`SEARCH_TIMEOUT`). |
+| Start-up fails mentioning `PROXY_SITES` | An entry is malformed (`shortcut=destination`), has an invalid shortcut (letters, digits, `-`, `_` only), a duplicate shortcut, or an invalid destination (IP, port, credentials, non-http scheme). Out-of-scope destinations only log a warning. |
 | First request after a pause is slow | Free-tier spin-down (§11). |
 | Website not authorized | Add the domain (and its subdomains with `*.`) to `PROXY_ALLOWED_DOMAINS`. |
 | A page looks broken | Its assets may come from an unlisted CDN (allow it) or it relies on WebSockets/service workers (unsupported). |
@@ -520,6 +690,9 @@ proxy/
 │   ├── policy.js            access policy: authorized scope → blacklist
 │   ├── allowlist.js         authorized scope (env + admin, file or memory storage)
 │   ├── blacklist.js         blacklist (env + admin, subdomain matching, export)
+│   ├── sites.js             site directory: shortcuts (env + admin), validated destinations, suggestions, export
+│   ├── resolve.js           search-box input → shortcut | address | search query
+│   ├── search/index.js      SEARCH_PROVIDER backends (searxng, brave, google, proxy), result sanitising/linking
 │   ├── store.js             atomic JSON persistence / memory mode
 │   ├── audit.js             recent configuration changes (in memory)
 │   ├── sessions.js          in-memory sessions with cookie jars (TTL, LRU)
@@ -527,10 +700,10 @@ proxy/
 │   ├── tools/               hash-password CLI
 │   ├── upstream/            HTTP client, header hygiene, decompression, byte limits
 │   ├── rewrite/             URL/srcset, CSS, charset handling, streaming HTML rewriter
-│   ├── routes/              site pages, proxy endpoint, admin, referer fallback
-│   ├── views/               HTML templates: home, about, errors, admin (dashboard, blacklist, settings, login)
-│   └── public/              style.css (design system, light/dark), theme.js, app.js, admin.js, favicon, shim.js
-├── test/                    node:test suites + local mock website (helpers/)
+│   ├── routes/              site pages (/, /search, /open, /suggest, /about), proxy endpoint, admin, referer fallback
+│   ├── views/               HTML templates: home, search box + results, about, errors, admin (dashboard, sites, blacklist, settings, login)
+│   └── public/              style.css (design system, light/dark), theme.js, app.js (suggestions combobox), admin.js, favicon, shim.js
+├── test/                    node:test suites + local mock website and mock search API (helpers/)
 ├── Dockerfile               multi-stage, non-root, honours $PORT
 ├── render.yaml              Render Blueprint (free Docker web service, /health check)
 ├── docker-compose.yml       local stack: app + Caddy (development / self-hosting)

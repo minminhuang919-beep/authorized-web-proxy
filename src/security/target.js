@@ -12,6 +12,7 @@ import { normalizeHostname } from './hostname.js';
 
 export const PROXY_PREFIX = '/p/';
 const SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
+const HOST_PORT_RE = /^[a-z0-9.-]+:\d+(?:[/?#]|$)/i;
 
 /**
  * Validate an absolute URL against the proxy's rules and the access policy
@@ -58,7 +59,9 @@ export function parseUserUrl(input, policy, { maxLength = 4096 } = {}) {
   if (text.length > maxLength) throw new InvalidUrlError('That address is too long.');
   if (/[\s\p{Cc}]/u.test(text)) throw new InvalidUrlError('The address contains invalid characters.');
   if (text.startsWith('//')) text = `https:${text}`;
-  else if (!SCHEME_RE.test(text)) text = `https://${text}`;
+  // `host:8080/x` would otherwise parse as the scheme "host"; treat it as a
+  // host with a port so the visitor gets the "custom port" explanation.
+  else if (!SCHEME_RE.test(text) || HOST_PORT_RE.test(text)) text = `https://${text}`;
   let url;
   try {
     url = new URL(text);

@@ -6,6 +6,11 @@ const ACTION_LABELS = {
   'blacklist.remove': 'Removed from blacklist',
   'scope.add': 'Authorized',
   'scope.remove': 'Removed from scope',
+  'site.add': 'Added shortcut',
+  'site.update': 'Updated shortcut',
+  'site.remove': 'Deleted shortcut',
+  'site.enable': 'Enabled shortcut',
+  'site.disable': 'Disabled shortcut',
   'admin.login': 'Signed in'
 };
 
@@ -21,6 +26,11 @@ export function dashboardPage({ health, changes, csrfToken, notice = '', error =
   const healthy = health.status === 'ok';
   const body = html`
 <section class="stat-grid" aria-label="Overview">
+  <a class="stat" href="/admin/sites">
+    <span class="stat-icon">${icons.bolt}</span>
+    <span class="stat-value">${health.sites.enabled}</span>
+    <span class="stat-label">Site shortcut${health.sites.enabled === 1 ? '' : 's'}${health.sites.size > health.sites.enabled ? ` · ${health.sites.size - health.sites.enabled} disabled` : ''}</span>
+  </a>
   <a class="stat" href="/admin/blacklist">
     <span class="stat-icon">${icons.block}</span>
     <span class="stat-value">${health.blacklist.size}</span>
@@ -69,6 +79,7 @@ export function dashboardPage({ health, changes, csrfToken, notice = '', error =
       <div><dt>Upstream in flight</dt><dd>${health.upstream.inFlight}</dd></div>
       <div><dt>Upstream requests</dt><dd>${health.upstream.total} <span class="muted">(${health.upstream.errors} errors, ${health.upstream.timeouts} timeouts)</span></dd></div>
       <div><dt>Blocked addresses</dt><dd>${health.upstream.blockedAddresses}</dd></div>
+      <div><dt>Web search</dt><dd>${health.search.enabled ? html`<code>${health.search.provider}</code>` : html`<span class="muted">not configured</span> <code class="env">SEARCH_PROVIDER</code>`}</dd></div>
       <div><dt>Admin data</dt><dd>${health.blacklist.persistent ? 'persisted to disk' : html`<span class="tag tag-warn">memory only</span> lost on restart`}</dd></div>
     </dl>
   </div>

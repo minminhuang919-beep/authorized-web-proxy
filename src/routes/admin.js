@@ -6,6 +6,12 @@
  *   POST /admin/blacklist            add an entry (form or JSON)
  *   DELETE /admin/blacklist/:id      remove an entry (JSON API, x-csrf-token header)
  *   POST /admin/blacklist/:id/delete remove an entry (HTML form fallback)
+ *   GET  /admin/sites                site directory (HTML) or JSON with Accept: application/json
+ *   POST /admin/sites                add a shortcut (form or JSON)
+ *   GET  /admin/sites/:id/edit       edit page
+ *   POST /admin/sites/:id            update (HTML form); PUT/PATCH = JSON API
+ *   POST /admin/sites/:id/toggle     enable/disable (HTML form)
+ *   DELETE /admin/sites/:id          remove (JSON API); POST /admin/sites/:id/delete = HTML form
  *   GET  /admin/settings             authorized scope + configuration
  *   POST /admin/domains, /admin/domains/remove   authorized scope changes
  *   GET/POST /admin/login, POST /admin/logout
@@ -22,6 +28,7 @@ import { loginPage } from '../views/admin/login.js';
 import { dashboardPage } from '../views/admin/dashboard.js';
 import { blacklistPage } from '../views/admin/blacklist.js';
 import { settingsPage } from '../views/admin/settings.js';
+import { siteEditPage, sitesPage } from '../views/admin/sites.js';
 import { ProxyError } from '../errors.js';
 
 /** Constant-time comparison of two strings of arbitrary length. */
@@ -37,8 +44,18 @@ function wantsJson(request) {
   return request.query?.format === 'json' || (accept.includes('application/json') && !accept.includes('text/html')) || ct.includes('application/json');
 }
 
+/** Human-readable search configuration for the Settings page — never the API key. */
+function searchSummary(search) {
+  if (search.provider === 'none') return 'not configured';
+  const parts = [search.provider];
+  if (search.url) parts.push(search.provider === 'proxy' ? search.url : new URL(search.url).host);
+  if (search.apiKey) parts.push('API key set');
+  if (search.engineId) parts.push(`engine ${search.engineId}`);
+  return parts.join(' · ');
+}
+
 export default async function adminRoutes(app) {
-  const { config, sessions, allowlist, blacklist, audit } = app;
+  const { config, sessions, allowlist, blacklist, sites, audit } = app;
 
   if (!config.admin.enabled) {
     // Admin disabled: behave as if the area does not exist.
@@ -235,10 +252,169 @@ export default async function adminRoutes(app) {
     return reply.redirect('/admin/blacklist', 303);
   });
 
+  // ---- site directory (shortcuts) -------------------------------------------------
+  const siteFieldsSchema = {
+    name: { type: 'string', maxLength: 200 },
+    shortcut: { type: 'string', maxLength: 100 },
+    destination: { type: 'string', maxLength: 2100 },
+    description: { type: 'string', maxLength: 300 },
+    enabled: {}, // "on" / "1" / true / false — normalised by siteFields()
+    _csrf: { type: 'string', maxLength: 200 }
+  };
+  const siteBodySchema = { type: 'object', properties: siteFieldsSchema };
+  const siteIdSchema = { type: 'object', properties: { id: { type: 'string', pattern: '^[0-9a-f]{16}$' } }, required: ['id'] };
+  const siteErrorCode = (result) => (result.status === 409 ? 'DUPLICATE' : result.status === 404 ? 'NOT_FOUND' : result.status === 403 ? 'LOCKED' : result.code || 'INVALID');
+  const siteError = (reply, result) => reply.code(result.status).send({ error: { status: result.status, code: siteErrorCode(result), message: result.error } });
+
+  /** Only the fields present in the body (PATCH semantics); HTML checkboxes are absent when unchecked. */
+  const siteFields = (body, { checkbox = false } = {}) => {
+    const src = body && typeof body === 'object' ? body : {};
+    const out = {};
+    for (const key of ['name', 'shortcut', 'destination', 'description']) {
+      if (typeof src[key] === 'string') out[key] = src[key];
+    }
+    if (checkbox) out.enabled = src.enabled !== undefined && src.enabled !== '' && src.enabled !== '0' && src.enabled !== 'false' && src.enabled !== false;
+    else if (src.enabled !== undefined && src.enabled !== null) out.enabled = src.enabled;
+    return out;
+  };
+
+  const renderSites = (request, reply, { q = '', form = {}, notice = '', error = '', status = 200 } = {}) => {
+    const session = request.adminSession;
+    const f = takeFlash(session);
+    return reply
+      .code(status)
+      .type('text/html; charset=utf-8')
+      .send(
+        sitesPage({
+          entries: sites.list({ q }),
+          total: sites.size,
+          enabled: sites.enabledCount,
+          q,
+          persistent: sites.persistent,
+          exportValue: sites.exportEnvValue(),
+          csrfToken: session.csrfToken,
+          form,
+          notice: notice || f.notice || '',
+          error: error || f.error || ''
+        })
+      );
+  };
+
+  const recordSite = (request, action, entry, detail = '') => {
+    audit.record({ action, target: entry.shortcut, detail: detail || entry.host, actor: request.adminSession.admin.username });
+    request.log.info({ shortcut: entry.shortcut, host: entry.host }, action);
+  };
+
+  app.get(
+    '/sites',
+    {
+      preHandler: requireAdmin,
+      config: { rateLimit: generalRateLimit },
+      schema: { querystring: { type: 'object', properties: { q: { type: 'string', maxLength: 200 }, format: { type: 'string', maxLength: 10 } } } }
+    },
+    async (request, reply) => {
+      const q = typeof request.query.q === 'string' ? request.query.q : '';
+      if (wantsJson(request)) {
+        return { entries: sites.list({ q }), total: sites.size, enabled: sites.enabledCount, persistent: sites.persistent };
+      }
+      return renderSites(request, reply, { q });
+    }
+  );
+
+  app.post('/sites', { preHandler: [requireAdmin, requireCsrf], config: { rateLimit: generalRateLimit }, schema: { body: siteBodySchema } }, async (request, reply) => {
+    const json = wantsJson(request);
+    const fields = siteFields(request.body, { checkbox: !json });
+    const result = await sites.add(fields);
+    if (!result.ok) {
+      if (json) return siteError(reply, result);
+      return renderSites(request, reply, { error: result.error, form: fields, status: result.status });
+    }
+    recordSite(request, 'site.add', result.entry);
+    if (json) return reply.code(201).send({ entry: result.entry });
+    flash(request.adminSession, { notice: `Shortcut "${result.entry.shortcut}" now opens ${result.entry.host}.` });
+    return reply.redirect('/admin/sites', 303);
+  });
+
+  const renderSiteEdit = (request, reply, entry, { form = null, error = '', status = 200 } = {}) =>
+    reply
+      .code(status)
+      .type('text/html; charset=utf-8')
+      .send(siteEditPage({ entry, csrfToken: request.adminSession.csrfToken, form, error }));
+
+  app.get('/sites/:id/edit', { preHandler: requireAdmin, config: { rateLimit: generalRateLimit }, schema: { params: siteIdSchema } }, async (request, reply) => {
+    const entry = sites.getById(request.params.id);
+    if (!entry || entry.source === 'env') {
+      flash(request.adminSession, { error: entry ? `"${entry.shortcut}" comes from PROXY_SITES and can only be changed by editing the environment.` : 'That shortcut does not exist.' });
+      return reply.redirect('/admin/sites', 303);
+    }
+    return renderSiteEdit(request, reply, entry);
+  });
+
+  app.post('/sites/:id', { preHandler: [requireAdmin, requireCsrf], config: { rateLimit: generalRateLimit }, schema: { params: siteIdSchema, body: siteBodySchema } }, async (request, reply) => {
+    const entry = sites.getById(request.params.id);
+    const fields = siteFields(request.body, { checkbox: true });
+    const result = await sites.update(request.params.id, fields);
+    if (!result.ok) {
+      if (!entry || result.status === 403) {
+        flash(request.adminSession, { error: result.error });
+        return reply.redirect('/admin/sites', 303);
+      }
+      return renderSiteEdit(request, reply, entry, { form: fields, error: result.error, status: result.status });
+    }
+    recordSite(request, 'site.update', result.entry);
+    flash(request.adminSession, { notice: `Shortcut "${result.entry.shortcut}" was updated.` });
+    return reply.redirect('/admin/sites', 303);
+  });
+
+  const updateSiteJson = async (request, reply) => {
+    const result = await sites.update(request.params.id, siteFields(request.body));
+    if (!result.ok) return siteError(reply, result);
+    recordSite(request, 'site.update', result.entry);
+    return { entry: result.entry };
+  };
+  app.put('/sites/:id', { preHandler: [requireAdmin, requireCsrf], config: { rateLimit: generalRateLimit }, schema: { params: siteIdSchema, body: siteBodySchema } }, updateSiteJson);
+  app.patch('/sites/:id', { preHandler: [requireAdmin, requireCsrf], config: { rateLimit: generalRateLimit }, schema: { params: siteIdSchema, body: siteBodySchema } }, updateSiteJson);
+
+  app.post(
+    '/sites/:id/toggle',
+    { preHandler: [requireAdmin, requireCsrf], config: { rateLimit: generalRateLimit }, schema: { params: siteIdSchema, body: siteBodySchema } },
+    async (request, reply) => {
+      const enabled = ['1', 'true', 'on'].includes(String(request.body?.enabled ?? '').toLowerCase());
+      const result = await sites.setEnabled(request.params.id, enabled);
+      if (result.ok) {
+        recordSite(request, enabled ? 'site.enable' : 'site.disable', result.entry);
+        flash(request.adminSession, { notice: `Shortcut "${result.entry.shortcut}" is now ${enabled ? 'enabled' : 'disabled'}.` });
+      } else {
+        flash(request.adminSession, { error: result.error });
+      }
+      return reply.redirect('/admin/sites', 303);
+    }
+  );
+
+  const removeSite = async (request) => {
+    const result = await sites.remove(request.params.id);
+    if (result.ok) recordSite(request, 'site.remove', result.entry);
+    return result;
+  };
+
+  app.delete('/sites/:id', { preHandler: [requireAdmin, requireCsrf], config: { rateLimit: generalRateLimit }, schema: { params: siteIdSchema } }, async (request, reply) => {
+    const result = await removeSite(request);
+    if (!result.ok) return siteError(reply, result);
+    return { ok: true, entry: result.entry };
+  });
+
+  app.post('/sites/:id/delete', { preHandler: [requireAdmin, requireCsrf], config: { rateLimit: generalRateLimit }, schema: { params: siteIdSchema } }, async (request, reply) => {
+    const result = await removeSite(request);
+    flash(request.adminSession, result.ok ? { notice: `Shortcut "${result.entry.shortcut}" was deleted.` } : { error: result.error });
+    return reply.redirect('/admin/sites', 303);
+  });
+
   // ---- settings: authorized scope + configuration -----------------------------------
   const settingsRows = () => [
     { label: 'Authorized scope (environment)', value: config.allowedDomains.join(', ') || '—', env: 'PROXY_ALLOWED_DOMAINS' },
     { label: 'Blacklist (environment)', value: config.blacklistEnv || '—', env: 'PROXY_BLACKLIST' },
+    { label: 'Site shortcuts (environment)', value: config.sitesEnv || '—', env: 'PROXY_SITES' },
+    { label: 'Web search', value: searchSummary(config.search), env: 'SEARCH_PROVIDER' },
     { label: 'Admin data storage', value: config.adminStorage === 'file' ? 'file (data directory)' : 'memory (ephemeral)', env: 'ADMIN_STORAGE' },
     { label: 'Links to unlisted domains', value: config.unlistedUrlMode === 'proxy' ? 'routed through the proxy (blocked)' : 'left direct', env: 'PROXY_UNLISTED_URL_MODE' },
     { label: 'Rate limit', value: `${config.rateLimit} requests / ${config.rateLimitWindowMs / 1000}s per client`, env: 'RATE_LIMIT' },
