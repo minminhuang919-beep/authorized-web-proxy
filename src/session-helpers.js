@@ -16,6 +16,12 @@ export function readSession(request, store, cookieName = SESSION_COOKIE) {
   return store.get(value);
 }
 
+/** The admin session for this request, or null when not signed in. */
+export function readAdminSession(request, store) {
+  const session = readSession(request, store, ADMIN_COOKIE);
+  return session?.admin ? session : null;
+}
+
 /** Session cookie attributes. `Secure` follows the (proxy-aware) request protocol. */
 export function sessionCookieOptions(request, config, { strict = false } = {}) {
   return {

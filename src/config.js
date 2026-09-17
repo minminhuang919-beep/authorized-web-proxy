@@ -8,6 +8,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
+import { hashPassword, isPasswordHash } from './security/password.js';
 
 const SIZE_RE = /^(\d+(?:\.\d+)?)\s*([kmg]?)b?$/i;
 const SIZE_MULT = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 };
@@ -64,17 +65,28 @@ export function loadConfig(env = process.env) {
   const isProduction = nodeEnv === 'production';
   const isTest = nodeEnv === 'test';
 
+  // Admin credentials. The password is never kept in plaintext by the app:
+  // either ADMIN_PASSWORD_HASH (scrypt, from `npm run hash-password`) is given,
+  // or ADMIN_PASSWORD is hashed at start-up and only the hash is retained.
   const adminUsername = pick(env, 'ADMIN_USERNAME', '');
   const adminPassword = pick(env, 'ADMIN_PASSWORD', '');
-  if ((adminUsername && !adminPassword) || (!adminUsername && adminPassword)) {
-    throw new ConfigError('ADMIN_USERNAME and ADMIN_PASSWORD must both be set (or both left empty to disable the admin area)');
+  const adminPasswordHash = pick(env, 'ADMIN_PASSWORD_HASH', '');
+  if (adminPasswordHash && !isPasswordHash(adminPasswordHash)) {
+    throw new ConfigError('ADMIN_PASSWORD_HASH is not a valid hash (generate one with: npm run hash-password)');
   }
-  if (adminPassword && adminPassword.length < 12) {
-    throw new ConfigError('ADMIN_PASSWORD must be at least 12 characters long');
+  const hasCredential = Boolean(adminPassword || adminPasswordHash);
+  if ((adminUsername && !hasCredential) || (!adminUsername && hasCredential)) {
+    throw new ConfigError('ADMIN_USERNAME and ADMIN_PASSWORD (or ADMIN_PASSWORD_HASH) must both be set, or both left empty to disable the admin area');
   }
-  if (adminPassword && ['password', 'changeme', 'admin'].some((w) => adminPassword.toLowerCase().includes(w))) {
-    throw new ConfigError('ADMIN_PASSWORD is too weak (contains a common word)');
+  if (adminPassword && !adminPasswordHash) {
+    if (adminPassword.length < 12) {
+      throw new ConfigError('ADMIN_PASSWORD must be at least 12 characters long');
+    }
+    if (['password', 'changeme', 'admin'].some((w) => adminPassword.toLowerCase().includes(w))) {
+      throw new ConfigError('ADMIN_PASSWORD is too weak (contains a common word)');
+    }
   }
+  const adminHash = adminPasswordHash || (adminPassword ? hashPassword(adminPassword) : '');
 
   let sessionSecret = pick(env, 'SESSION_SECRET', '');
   let generatedSessionSecret = false;
@@ -112,11 +124,13 @@ export function loadConfig(env = process.env) {
     throw new ConfigError('CLIENT_IP_HEADER must be a header name such as true-client-ip');
   }
 
-  // ALLOWLIST_STORAGE: `file` persists admin-added domains under DATA_DIR;
-  // `memory` keeps them in RAM only (for hosts with an ephemeral filesystem).
-  const allowlistStorage = pick(env, 'ALLOWLIST_STORAGE', 'file').toLowerCase();
-  if (!['file', 'memory'].includes(allowlistStorage)) {
-    throw new ConfigError('ALLOWLIST_STORAGE must be "file" or "memory"');
+  // ADMIN_STORAGE (alias: ALLOWLIST_STORAGE): `file` persists admin-managed
+  // data (authorized scope additions, blacklist) as JSON under DATA_DIR;
+  // `memory` keeps it in RAM only — for hosts with an ephemeral filesystem
+  // such as Render's free plan, where the environment is the source of truth.
+  const adminStorage = pick(env, 'ADMIN_STORAGE', pick(env, 'ALLOWLIST_STORAGE', 'file')).toLowerCase();
+  if (!['file', 'memory'].includes(adminStorage)) {
+    throw new ConfigError('ADMIN_STORAGE must be "file" or "memory"');
   }
   const dataDir = path.resolve(pick(env, 'DATA_DIR', './data'));
 
@@ -130,8 +144,11 @@ export function loadConfig(env = process.env) {
     trustProxy,
     clientIpHeader: clientIpHeader || null,
     dataDir,
-    allowlistStorage,
-    allowlistFile: allowlistStorage === 'file' ? path.join(dataDir, 'allowlist.json') : null,
+    adminStorage,
+    allowlistStorage: adminStorage,
+    allowlistFile: adminStorage === 'file' ? path.join(dataDir, 'allowlist.json') : null,
+    blacklistFile: adminStorage === 'file' ? path.join(dataDir, 'blacklist.json') : null,
+    blacklistEnv: pick(env, 'PROXY_BLACKLIST', ''),
 
     allowedDomains: parseList(pick(env, 'PROXY_ALLOWED_DOMAINS', '')),
     unlistedUrlMode,
@@ -139,9 +156,9 @@ export function loadConfig(env = process.env) {
     banner: parseBool(pick(env, 'PROXY_BANNER', 'true'), 'PROXY_BANNER'),
 
     admin: Object.freeze({
-      enabled: Boolean(adminUsername && adminPassword),
+      enabled: Boolean(adminUsername && adminHash),
       username: adminUsername,
-      password: adminPassword
+      passwordHash: adminHash
     }),
 
     sessionSecret,

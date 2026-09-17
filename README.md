@@ -6,10 +6,11 @@ shows it to you, so the website sees the proxy's IP address instead of yours.
 Links, images, stylesheets, forms and most scripts keep working because every
 URL is rewritten to go back through the proxy.
 
-It is deliberately **not** an open proxy: only domains an administrator has
-put on an allowlist can be opened, and a strict set of network rules makes it
-unusable as an SSRF tool against internal services. It does not try to defeat
-logins, CAPTCHAs, bot protection or content filters.
+It is deliberately **not** an open proxy: only websites inside the
+administrator's **authorized scope** can be opened, the administrator can
+additionally **blacklist** individual websites, and a strict set of network
+rules makes it unusable as an SSRF tool against internal services. It does
+not try to defeat logins, CAPTCHAs, bot protection or content filters.
 
 The repository contains the application, its test-suite, a Dockerfile, a
 `docker-compose.yml` for local development, and a `render.yaml` Blueprint
@@ -23,7 +24,7 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
 2. [Architecture](#2-architecture)
 3. [Local development](#3-local-development)
 4. [Environment variables](#4-environment-variables)
-5. [How the allowlist works](#5-how-the-allowlist-works)
+5. [Authorized scope and blacklist](#5-authorized-scope-and-blacklist)
 6. [Security model](#6-security-model)
 7. [Deploying to Render](#7-deploying-to-render)
 8. [Custom domain and HTTPS](#8-custom-domain-and-https)
@@ -37,10 +38,13 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
 
 ## 1. What it does
 
-* **Homepage** with a large address box. Enter `example.com/page` (the
-  `https://` is optional) and press *Open*.
-* The proxy validates the address, fetches it server-side over HTTP/HTTPS and
-  streams it back to you under `https://your-proxy/p/https/example.com/page`.
+* **Search-engine style homepage**: a large centred address box. Enter
+  `example.com/page` (the `https://` is optional) and press *Open*. A
+  progress bar and button spinner show while the page is being fetched.
+* The proxy validates and normalises the address, checks the **authorized
+  scope**, then the **blacklist**, then fetches it server-side over HTTP/HTTPS
+  (SSRF address checks run on the resolved addresses) and streams it back to
+  you under `https://your-proxy/p/https/example.com/page`.
 * HTML and CSS are rewritten on the fly so that navigation, images, fonts,
   stylesheets, forms, iframes and `srcset` images stay inside the proxy.
   Scripts are relayed unchanged; a small client-side shim keeps
@@ -53,8 +57,12 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
   assets are streamed through untouched with their original headers.
 * Redirects are re-validated against the allowlist before the browser is
   allowed to follow them.
-* A protected **admin area** (`/admin`) lets you view, add and remove allowed
-  domains and see health/status information.
+* A protected **admin area** (`/admin`) with a dashboard (counts, proxy
+  status, recent configuration changes), a **Blacklist** page (add / search /
+  delete with confirmation, reasons, timestamps, JSON API) and a **Settings**
+  page (authorized scope, running configuration).
+* Light and dark themes (follows the system, with a manual toggle), fully
+  keyboard accessible, responsive down to phone widths.
 * `/health` returns a JSON status for monitoring and for Render's health check.
 
 ## 2. Architecture
@@ -78,8 +86,9 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
 
 Request flow for `GET /p/https/example.com/a`:
 
-1. `src/routes/proxy.js` parses the path, normalises the hostname and checks
-   the allowlist (`src/allowlist.js`, `src/security/target.js`).
+1. `src/routes/proxy.js` parses the path, normalises the hostname and runs
+   the access policy (`src/policy.js`): authorized scope (`src/allowlist.js`)
+   first, then the blacklist (`src/blacklist.js`).
 2. Request headers are sanitised (`src/upstream/headers.js`); the visitor's
    session jar supplies the `Cookie` header (`tough-cookie`).
 3. `src/upstream/client.js` opens the connection. DNS is resolved through a
@@ -106,7 +115,8 @@ npm install
 cp .env.example .env          # edit PROXY_ALLOWED_DOMAINS, ADMIN_* …
 npm run dev                   # http://localhost:8080 with pretty logs (auto-reload)
 
-npm test                      # 96 tests against a local mock website (no network needed)
+npm test                      # 116 tests against a local mock website (no network needed)
+npm run hash-password         # print an scrypt hash for ADMIN_PASSWORD_HASH
 npm run lint                  # ESLint
 npm run check                 # lint + test
 ```
@@ -124,9 +134,9 @@ cp .env.example .env
 docker compose up --build     # http://localhost  (Caddy on :80; with DOMAIN set, HTTPS via Let's Encrypt)
 ```
 
-Admin-added domains are persisted in the `app_data` volume
-(`ALLOWLIST_STORAGE=file`, the default). Caddy is only part of the local
-stack; Render provides TLS itself.
+Admin-added scope entries and blacklist entries are persisted in the
+`app_data` volume (`ADMIN_STORAGE=file`, the default). Caddy is only part of
+the local stack; Render provides TLS itself.
 
 ## 4. Environment variables
 
@@ -141,11 +151,13 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 | `LOG_LEVEL` | `info` | pino log level. |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` from the reverse proxy (`true` on Render / docker-compose; a number = proxy hop count). |
 | `CLIENT_IP_HEADER` | *(empty)* | Header set by a trusted edge with the real client IP, used for rate limiting (`true-client-ip` on Render). |
-| `PROXY_ALLOWED_DOMAINS` | *(empty)* | Comma-separated allowlist, e.g. `example.com,*.example.com`. |
+| `PROXY_ALLOWED_DOMAINS` | *(empty)* | The **authorized scope**, comma-separated, e.g. `example.com,*.example.com`. |
+| `PROXY_BLACKLIST` | *(empty)* | Blacklisted domains inside the scope, comma-separated, optional `\|reason`: `ads.example.com\|Not permitted,tracker.example`. |
 | `PROXY_UNLISTED_URL_MODE` | `direct` | `direct`: links to unlisted domains stay direct; `proxy`: route them through the proxy (they get a "not authorized" page). |
 | `PROXY_SHOW_ALLOWLIST` | `true` | Show the allowed domains on the homepage. |
 | `PROXY_BANNER` | `true` | Inject the slim "viewing through AnonView" bar into proxied pages. |
-| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | *(empty = admin disabled)* | Admin login. Password ≥ 12 characters, no common words. |
+| `ADMIN_USERNAME`, `ADMIN_PASSWORD` | *(empty = admin disabled)* | Admin login. Password ≥ 12 characters, no common words; it is hashed (scrypt) at start-up and never kept in plaintext by the app. |
+| `ADMIN_PASSWORD_HASH` | *(empty)* | Preferred alternative to `ADMIN_PASSWORD`: an scrypt hash from `npm run hash-password`, so no plaintext password is stored anywhere. |
 | `SESSION_SECRET` | *(required in production)* | ≥ 32 random characters; signs session cookies. Render generates it. |
 | `SESSION_TTL` / `SESSION_MAX` | `1800` / `5000` | Idle lifetime and maximum number of sessions kept in memory. |
 | `RATE_LIMIT` / `RATE_LIMIT_WINDOW` | `300` / `60` | Requests per client IP per window. |
@@ -156,33 +168,69 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 | `CONNECT_TIMEOUT` | `10` | Seconds to establish the upstream TCP/TLS connection. |
 | `TRANSFER_TIMEOUT` | `300` | Hard cap on the duration of one proxied response. |
 | `MAX_CONCURRENT_UPSTREAM` | `64` | In-flight upstream requests across all visitors (503 beyond). |
-| `ALLOWLIST_STORAGE` | `file` | `file`: admin-added domains persisted under `DATA_DIR`; `memory`: RAM only (Render — ephemeral disk). |
-| `DATA_DIR` | `./data` | Directory for `allowlist.json` when `ALLOWLIST_STORAGE=file`. |
+| `ADMIN_STORAGE` | `file` | Where admin-managed data lives: `file` = JSON under `DATA_DIR`; `memory` = RAM only (Render — ephemeral disk). `ALLOWLIST_STORAGE` is accepted as an alias. |
+| `DATA_DIR` | `./data` | Directory for `allowlist.json` / `blacklist.json` when `ADMIN_STORAGE=file`. |
 | `DOMAIN`, `ACME_EMAIL` | *(empty)* | Local docker-compose + Caddy only. Ignored on Render. |
 
 `.env` is git-ignored; never commit it. `.env.example` documents every key.
 
-## 5. How the allowlist works
+## 5. Authorized scope and blacklist
 
-* Matching is **strict**: `example.com` matches only `example.com`.
-  `*.example.com` matches every subdomain (`www.example.com`, `a.b.example.com`)
-  but *not* the bare `example.com` — list both if you want both.
-* Entries can only be hostnames. IP addresses, ports and paths are rejected.
-* Two sources are merged:
-  * `PROXY_ALLOWED_DOMAINS` from the environment — **locked**, shown as
-    "environment" in the admin UI; change them in Render's *Environment* tab
-    (Render redeploys automatically).
-  * Domains added in `/admin` — with `ALLOWLIST_STORAGE=file` (local Docker)
-    they are saved to `DATA_DIR/allowlist.json`; with `ALLOWLIST_STORAGE=memory`
-    (Render) they live in RAM and are **lost on restart or redeploy**. The
-    admin page says so. Treat `PROXY_ALLOWED_DOMAINS` as the source of truth on
-    Render and use the admin UI for quick experiments.
-* Everything not on the list gets a clear "Website not authorized" page. In the
-  default `direct` mode, links and assets on a proxied page that point to
-  unlisted domains are left as direct links (your browser would contact those
-  sites directly if you follow them; images from unlisted CDNs load directly).
-  Set `PROXY_UNLISTED_URL_MODE=proxy` to have them blocked instead — then add
-  the CDN domains you need to the allowlist.
+A request is permitted only when **all** of the following hold, checked in
+this order:
+
+```
+AUTHORIZED SCOPE  →  BLACKLIST  →  SSRF / SECURITY CHECKS  →  allow
+```
+
+1. **Authorized scope** — the hostname must be on the allowlist. Matching is
+   strict: `example.com` matches only `example.com`; `*.example.com` matches
+   every subdomain but not the bare domain (list both for both). Entries are
+   hostnames only — IP addresses, ports and paths are rejected. Anything
+   outside the scope gets a “Website not authorized” page. Sources:
+   `PROXY_ALLOWED_DOMAINS` (locked, shown as *environment*) plus entries added
+   on the admin **Settings** page.
+2. **Blacklist** — the administrator can block websites *inside* the scope.
+   Those get a “Website unavailable — The administrator has blocked this
+   website.” page with no further detail. The blacklist can only narrow the
+   scope; it never authorizes anything.
+3. **SSRF / security checks** — performed on the resolved addresses at
+   connection time (see §6). These are never skipped.
+
+**Blacklist matching rule** — an entry blocks the domain **and all of its
+subdomains**, matched on whole DNS labels:
+
+| Entry | Blocks | Does *not* block |
+|---|---|---|
+| `example.com` | `example.com`, `www.example.com`, `a.b.example.com` | `notexample.com`, `example.com.evil.net`, `example.org` |
+| `shop.example.com` | `shop.example.com`, `eu.shop.example.com` | `example.com`, `www.example.com` |
+
+Wildcards are not needed (and are rejected) because every entry already
+covers its subdomains. Adding a domain that is already covered by a broader
+entry is refused as a duplicate. Because the scope is checked first, a
+blacklisted host that is *not* in the scope is reported as “not authorized”.
+
+Links on proxied pages that point at blacklisted hosts stay routed through
+the proxy, so clicking them shows the blocked page rather than leaving the
+proxy. Redirects to blacklisted or unauthorized destinations are stopped.
+
+Sources: `PROXY_BLACKLIST` in the environment (locked, format
+`domain|reason,domain2`) plus entries added on the admin **Blacklist** page.
+
+**Persistence.** With `ADMIN_STORAGE=file` (local Docker) admin changes are
+saved as JSON in `DATA_DIR` and survive restarts. On Render's free plan the
+filesystem is ephemeral and there is no database, so `render.yaml` sets
+`ADMIN_STORAGE=memory`: changes made in the admin UI take effect immediately
+but are **lost on restart or redeploy**. The Blacklist page shows an *Export
+as `PROXY_BLACKLIST` value* box — copy it into the service's Environment tab
+to make the list permanent (the same applies to scope additions and
+`PROXY_ALLOWED_DOMAINS`). No password is ever stored: the admin password is
+kept only as an scrypt hash.
+
+* In the default `PROXY_UNLISTED_URL_MODE=direct`, links and assets on a
+  proxied page that point to domains *outside the scope* are left as direct
+  links (your browser would contact those sites directly if you follow them).
+  Set `proxy` to have them blocked instead.
 
 ## 6. Security model
 
@@ -225,8 +273,11 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
   `X-Robots-Tag: noindex`.
 * The proxy's own pages carry a strict CSP and Helmet's security headers; the
   app sends `Strict-Transport-Security` on every HTTPS response.
-* Admin: constant-time credential comparison, signed `SameSite=Strict` session
-  cookie, CSRF tokens on every state change, login rate limiting, `no-store`.
+* Admin: scrypt-hashed password verified in constant time, signed
+  `SameSite=Strict` session cookie, CSRF tokens on every state change (form
+  field or `x-csrf-token` header for the JSON API), login rate limiting,
+  `no-store`. The API returns 401 without a session and 403 without a valid
+  token; environment-defined entries cannot be deleted through it.
 * Errors shown to users are generic; details, stack traces and resolved
   addresses go to the server log only. Logs never contain cookies,
   authorization headers, request bodies or query strings (proxied URLs are
@@ -235,8 +286,30 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 * Container: non-root user (uid 1000), production-only dependencies, memory
   cap sized for Render's free instance; no secrets in the image or repo.
 
-See `test/ssrf.test.js` and `test/render.test.js` for the executable version
-of these guarantees.
+See `test/ssrf.test.js`, `test/blacklist.test.js` and `test/render.test.js`
+for the executable version of these guarantees.
+
+### Admin area
+
+Sign in at `/admin/login` (the *Admin* link appears in the navigation once you
+are signed in). Sections:
+
+* **Dashboard** — number of blacklisted domains, size of the authorized scope,
+  proxy health, uptime, service statistics and the recent configuration
+  changes made through the UI.
+* **Blacklist** — add a domain with an optional reason, search/filter the
+  table (domain or reason), see when each entry was added, delete with a
+  confirmation dialog, export the list as a `PROXY_BLACKLIST` value.
+* **Settings** — manage the authorized scope and view the running
+  configuration (read-only; values come from the environment).
+
+JSON API (same session cookie, plus `x-csrf-token` taken from the page):
+
+```
+GET    /admin/blacklist            Accept: application/json  → { entries, total, persistent }
+POST   /admin/blacklist            { "domain": "ads.example.com", "reason": "Not permitted" } → 201 { entry }
+DELETE /admin/blacklist/:id        → 200 { ok, entry } | 404 | 403 (environment entry)
+```
 
 ## 7. Deploying to Render
 
@@ -297,12 +370,17 @@ non-secret variables and marks these for you to enter:
 
 Predefined by `render.yaml` (change in the *Environment* tab if needed):
 `NODE_ENV=production`, `PORT=10000`, `HOST=0.0.0.0`, `TRUST_PROXY=true`,
-`CLIENT_IP_HEADER=true-client-ip`, `ALLOWLIST_STORAGE=memory`,
+`CLIENT_IP_HEADER=true-client-ip`, `ADMIN_STORAGE=memory`,
 `LOG_LEVEL=info`, `RATE_LIMIT=300`, `RATE_LIMIT_WINDOW=60`,
 `ADMIN_RATE_LIMIT=10`, `MAX_RESPONSE_SIZE=20m`, `MAX_REQUEST_SIZE=2m`,
 `REQUEST_TIMEOUT=30`, `CONNECT_TIMEOUT=10`, `TRANSFER_TIMEOUT=300`,
 `MAX_CONCURRENT_UPSTREAM=32`, `PROXY_UNLISTED_URL_MODE=direct`,
 `PROXY_SHOW_ALLOWLIST=true`, `PROXY_BANNER=true`.
+
+Optional variables you can add in the *Environment* tab: `PROXY_BLACKLIST`
+(permanent blacklist entries, format `domain|reason,domain2`) and
+`ADMIN_PASSWORD_HASH` (use it instead of `ADMIN_PASSWORD`; generate with
+`npm run hash-password`).
 
 Changing any variable triggers an automatic redeploy.
 
@@ -401,7 +479,8 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
   Very large proxied downloads are streamed, so memory stays flat.
 * **Ephemeral filesystem:** anything written to disk is lost on restart or
   redeploy, and persistent disks are not available on the free plan —
-  hence `ALLOWLIST_STORAGE=memory` and env-var driven configuration.
+  hence `ADMIN_STORAGE=memory` and env-var driven configuration (export the
+  blacklist from the admin page into `PROXY_BLACKLIST` to keep it).
 * **Bandwidth:** 100 GB/month outbound included; free services are
   suspended for the rest of the month if exceeded.
 * **Build minutes:** 500 pipeline minutes/month; each deploy of this image
@@ -416,10 +495,11 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 |---|---|
 | Build fails on Render | Events → deploy logs. The build only needs `package.json`, `package-lock.json` and `src/`; make sure they are committed. |
 | Deploy stuck on "health check" | Logs tab. Common cause: a configuration error printed at start-up (`SESSION_SECRET` missing, `ADMIN_PASSWORD` shorter than 12 chars or containing a common word, invalid `PROXY_ALLOWED_DOMAINS` entry such as an IP or a port). Fix the variable → Render redeploys. |
-| `/admin` returns 404 | Both `ADMIN_USERNAME` and `ADMIN_PASSWORD` must be set. |
+| `/admin` returns 404 | `ADMIN_USERNAME` and `ADMIN_PASSWORD` (or `ADMIN_PASSWORD_HASH`) must be set. |
+| A blacklisted site still opens | Check the scope/blacklist order: only hosts inside the scope reach the blacklist; entries cover subdomains, so `example.com` also blocks `www.example.com`. |
+| A domain added in `/admin` disappeared | Expected on Render (`ADMIN_STORAGE=memory`); export it to `PROXY_BLACKLIST` / `PROXY_ALLOWED_DOMAINS`. |
 | First request after a pause is slow | Free-tier spin-down (§11). |
 | Website not authorized | Add the domain (and its subdomains with `*.`) to `PROXY_ALLOWED_DOMAINS`. |
-| A domain added in `/admin` disappeared | Expected on Render (`ALLOWLIST_STORAGE=memory`); put it in `PROXY_ALLOWED_DOMAINS`. |
 | A page looks broken | Its assets may come from an unlisted CDN (allow it) or it relies on WebSockets/service workers (unsupported). |
 | `503 The proxy is busy` | `MAX_CONCURRENT_UPSTREAM` reached — raise it or check for a slow upstream. |
 | `429 Too many requests` for a legitimate user | Raise `RATE_LIMIT`; on Render the limiter keys on `True-Client-IP`. |
@@ -437,14 +517,19 @@ proxy/
 │   ├── server.js            entry point (env loading, graceful shutdown on SIGTERM)
 │   ├── app.js               Fastify app factory, error handler, 404/referer fallback, HSTS
 │   ├── config.js            environment parsing & validation
-│   ├── allowlist.js         env + admin-managed allowlist (file or memory storage)
+│   ├── policy.js            access policy: authorized scope → blacklist
+│   ├── allowlist.js         authorized scope (env + admin, file or memory storage)
+│   ├── blacklist.js         blacklist (env + admin, subdomain matching, export)
+│   ├── store.js             atomic JSON persistence / memory mode
+│   ├── audit.js             recent configuration changes (in memory)
 │   ├── sessions.js          in-memory sessions with cookie jars (TTL, LRU)
-│   ├── security/            address policy, hostname rules, safe DNS lookup, target parsing
+│   ├── security/            address policy, hostname rules, safe DNS lookup, target parsing, scrypt passwords
+│   ├── tools/               hash-password CLI
 │   ├── upstream/            HTTP client, header hygiene, decompression, byte limits
 │   ├── rewrite/             URL/srcset, CSS, charset handling, streaming HTML rewriter
 │   ├── routes/              site pages, proxy endpoint, admin, referer fallback
-│   ├── views/               HTML templates (escaping helpers)
-│   └── public/              style.css, homepage JS, favicon, client shim (shim.js)
+│   ├── views/               HTML templates: home, about, errors, admin (dashboard, blacklist, settings, login)
+│   └── public/              style.css (design system, light/dark), theme.js, app.js, admin.js, favicon, shim.js
 ├── test/                    node:test suites + local mock website (helpers/)
 ├── Dockerfile               multi-stage, non-root, honours $PORT
 ├── render.yaml              Render Blueprint (free Docker web service, /health check)

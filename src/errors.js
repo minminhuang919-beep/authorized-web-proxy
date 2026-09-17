@@ -39,6 +39,14 @@ export class DomainNotAllowedError extends ProxyError {
   }
 }
 
+/** The destination is inside the authorized scope but an administrator blacklisted it. */
+export class DomainBlockedError extends ProxyError {
+  constructor(hostname, extra = {}) {
+    // Deliberately generic: no reason, no rule details.
+    super('DOMAIN_BLACKLISTED', 403, 'The administrator has blocked this website.', { hostname, ...extra });
+  }
+}
+
 export class BlockedAddressError extends ProxyError {
   constructor(hostname) {
     // Deliberately does not reveal which address was resolved.

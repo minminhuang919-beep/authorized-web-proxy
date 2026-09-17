@@ -7,7 +7,7 @@
  * headers → stream the body back, decoding and rewriting HTML/CSS on the fly.
  */
 import { pipeline } from 'node:stream';
-import { DomainNotAllowedError, InvalidUrlError, ProxyError, RequestTooLargeError } from '../errors.js';
+import { DomainBlockedError, DomainNotAllowedError, InvalidUrlError, ProxyError, RequestTooLargeError } from '../errors.js';
 import { splitProxyPath, targetFromProxyPath, toProxyPath, validateTarget } from '../security/target.js';
 import { ACCEPT_ENCODING, canDecode, clientAccepts, createDecoder, normalizeEncoding } from '../upstream/decompress.js';
 import { buildUpstreamRequestHeaders, filterUpstreamResponseHeaders } from '../upstream/headers.js';
@@ -24,7 +24,7 @@ const BODYLESS_STATUS = new Set([204, 205, 304]);
 const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 export default async function proxyRoutes(app) {
-  const { config, allowlist, sessions, upstream, urlRewriter } = app;
+  const { config, allowlist, policy, sessions, upstream, urlRewriter } = app;
   const via = `1.1 anonview/${app.appVersion}`;
 
   // Bodies are streamed through untouched, whatever their content type.
@@ -80,7 +80,7 @@ export default async function proxyRoutes(app) {
         return reply.redirect(`/p/${parts.scheme}/${parts.host.toLowerCase()}/${afterHost}`, 302);
       }
 
-      const { target } = targetFromProxyPath(rawUrl, allowlist, { maxLength: config.maxUrlLength });
+      const { target } = targetFromProxyPath(rawUrl, policy, { maxLength: config.maxUrlLength });
       const method = request.method;
 
       let session = readSession(request, sessions);
@@ -155,13 +155,15 @@ export default async function proxyRoutes(app) {
         const resolved = parseUrl(uh.location, target);
         if (resolved && (resolved.protocol === 'http:' || resolved.protocol === 'https:')) {
           try {
-            const validated = validateTarget(resolved, allowlist);
+            const validated = validateTarget(resolved, policy);
             location = toProxyPath(validated) + resolved.hash;
           } catch (err) {
-            // Whatever the reason (unlisted host, IP literal, custom port…)
-            // the upstream redirect is stopped and explained to the user.
+            // Whatever the reason (outside the authorized scope, blacklisted,
+            // IP literal, custom port…) the upstream redirect is stopped and
+            // explained to the user.
             res.body.destroy();
             if (!(err instanceof ProxyError)) throw err;
+            if (err.code === 'DOMAIN_BLACKLISTED') throw new DomainBlockedError(resolved.hostname, { redirectTarget: resolved.href });
             throw new DomainNotAllowedError(resolved.hostname, { redirectTarget: resolved.href });
           }
         } else if (resolved) {

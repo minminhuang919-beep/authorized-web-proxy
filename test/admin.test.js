@@ -59,19 +59,27 @@ describe('admin', () => {
     let dash = await ctx.app.inject({ method: 'GET', url: '/admin', headers: { cookie } });
     assert.equal(dash.statusCode, 200);
     assert.equal(dash.headers['cache-control'], 'no-store');
-    assert.match(dash.body, /<code>site\.test<\/code>/);
-    assert.match(dash.body, /environment/);
-    assert.match(dash.body, /Active sessions/);
+    assert.match(dash.body, /Blacklisted domain/);
+    assert.match(dash.body, /Authorized scope/);
+    assert.match(dash.body, /Proxy status/);
+    assert.match(dash.body, /Recent configuration changes/);
+    assert.match(dash.body, /href="\/admin\/blacklist"/);
+    assert.match(dash.body, /href="\/admin\/settings"/);
     const csrf = csrfFrom(dash.body);
     assert.ok(csrf);
+    dash = await ctx.app.inject({ method: 'GET', url: '/admin/settings', headers: { cookie } });
+    assert.equal(dash.statusCode, 200);
+    assert.match(dash.body, /<code class="domain">site\.test<\/code>/);
+    assert.match(dash.body, /environment/);
+    assert.match(dash.body, /Configuration/);
 
     // add
     let res = await ctx.app.inject({ method: 'POST', url: '/admin/domains', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: `_csrf=${csrf}&domain=New.Example` });
     assert.equal(res.statusCode, 303);
     assert.equal(ctx.app.allowlist.isAllowed('new.example'), true);
-    dash = await ctx.app.inject({ method: 'GET', url: '/admin', headers: { cookie } });
-    assert.match(dash.body, /Added new\.example/);
-    assert.match(dash.body, /<code>new\.example<\/code>/);
+    dash = await ctx.app.inject({ method: 'GET', url: '/admin/settings', headers: { cookie } });
+    assert.match(dash.body, /new\.example was added to the authorized scope/);
+    assert.match(dash.body, /<code class="domain">new\.example<\/code>/);
     // persisted to disk
     const file = JSON.parse(await fs.readFile(path.join(ctx.dataDir, 'allowlist.json'), 'utf8'));
     assert.deepEqual(file.domains.map((d) => d.pattern), ['new.example']);
@@ -81,17 +89,17 @@ describe('admin', () => {
 
     // invalid + duplicate
     await ctx.app.inject({ method: 'POST', url: '/admin/domains', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: `_csrf=${csrf}&domain=10.0.0.1` });
-    dash = await ctx.app.inject({ method: 'GET', url: '/admin', headers: { cookie } });
+    dash = await ctx.app.inject({ method: 'GET', url: '/admin/settings', headers: { cookie } });
     assert.match(dash.body, /Enter a valid hostname/);
     await ctx.app.inject({ method: 'POST', url: '/admin/domains', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: `_csrf=${csrf}&domain=new.example` });
-    dash = await ctx.app.inject({ method: 'GET', url: '/admin', headers: { cookie } });
+    dash = await ctx.app.inject({ method: 'GET', url: '/admin/settings', headers: { cookie } });
     assert.match(dash.body, /already on the allowlist/);
 
     // env entries are locked
     res = await ctx.app.inject({ method: 'POST', url: '/admin/domains/remove', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, payload: `_csrf=${csrf}&domain=site.test` });
     assert.equal(res.statusCode, 303);
     assert.equal(ctx.app.allowlist.isAllowed('site.test'), true);
-    dash = await ctx.app.inject({ method: 'GET', url: '/admin', headers: { cookie } });
+    dash = await ctx.app.inject({ method: 'GET', url: '/admin/settings', headers: { cookie } });
     assert.match(dash.body, /can only be removed by changing the environment/);
 
     // remove admin entry
@@ -130,7 +138,7 @@ describe('admin', () => {
   test('the admin area is disabled without credentials', async () => {
     const off = await createTestApp({ withMock: false });
     try {
-      for (const url of ['/admin', '/admin/', '/admin/login', '/admin/domains']) {
+      for (const url of ['/admin', '/admin/', '/admin/login', '/admin/domains', '/admin/blacklist', '/admin/settings']) {
         const res = await off.app.inject({ method: 'GET', url });
         assert.equal(res.statusCode, 404, url);
       }

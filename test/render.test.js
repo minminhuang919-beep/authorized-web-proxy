@@ -22,7 +22,9 @@ describe('render hosting', () => {
     assert.match(file.allowlistFile, /allowlist\.json$/);
     const mem = loadConfig({ ...base, ALLOWLIST_STORAGE: 'memory' });
     assert.equal(mem.allowlistFile, null);
-    assert.throws(() => loadConfig({ ...base, ALLOWLIST_STORAGE: 'disk' }), /ALLOWLIST_STORAGE/);
+    assert.throws(() => loadConfig({ ...base, ALLOWLIST_STORAGE: 'disk' }), /ADMIN_STORAGE/);
+    assert.equal(loadConfig({ ...base, ADMIN_STORAGE: 'memory' }).blacklistFile, null);
+    assert.match(loadConfig(base).blacklistFile, /blacklist\.json$/);
     assert.equal(loadConfig({ ...base, TRUST_PROXY: '1' }).trustProxy, 1);
     assert.equal(loadConfig({ ...base, TRUST_PROXY: 'true' }).trustProxy, true);
     assert.equal(loadConfig({ ...base, CLIENT_IP_HEADER: 'True-Client-IP' }).clientIpHeader, 'true-client-ip');
@@ -41,7 +43,9 @@ describe('render hosting', () => {
       });
       const cookie = cookieHeader(login);
       const dash = await ctx.app.inject({ method: 'GET', url: '/admin', headers: { cookie } });
-      assert.match(dash.body, /kept in memory only/);
+      assert.match(dash.body, /memory only/);
+      const settings = await ctx.app.inject({ method: 'GET', url: '/admin/settings', headers: { cookie } });
+      assert.match(settings.body, /memory only/);
       const csrf = /name="_csrf" value="([^"]+)"/.exec(dash.body)[1];
       const add = await ctx.app.inject({
         method: 'POST',
@@ -51,6 +55,14 @@ describe('render hosting', () => {
       });
       assert.equal(add.statusCode, 303);
       assert.equal(ctx.app.allowlist.isAllowed('memory.example'), true);
+      const bl = await ctx.app.inject({
+        method: 'POST',
+        url: '/admin/blacklist',
+        headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: `_csrf=${csrf}&domain=blocked.memory.example`
+      });
+      assert.equal(bl.statusCode, 303);
+      assert.equal(ctx.app.blacklist.isBlocked('blocked.memory.example'), true);
       const files = await fs.readdir(ctx.dataDir);
       assert.deepEqual(files, [], 'nothing written to DATA_DIR');
     } finally {
@@ -133,12 +145,13 @@ describe('render hosting', () => {
     assert.match(text, /^\s*plan: free$/m);
     assert.match(text, /^\s*healthCheckPath: \/health$/m);
     assert.match(text, /^\s*dockerfilePath: \.\/Dockerfile$/m);
-    for (const key of ['PROXY_ALLOWED_DOMAINS', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'SESSION_SECRET', 'RATE_LIMIT', 'MAX_RESPONSE_SIZE', 'REQUEST_TIMEOUT', 'PORT', 'TRUST_PROXY', 'ALLOWLIST_STORAGE']) {
+    for (const key of ['PROXY_ALLOWED_DOMAINS', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'SESSION_SECRET', 'RATE_LIMIT', 'MAX_RESPONSE_SIZE', 'REQUEST_TIMEOUT', 'PORT', 'TRUST_PROXY', 'ADMIN_STORAGE']) {
       assert.match(text, new RegExp(`^\\s*- key: ${key}\\b`, 'm'), `${key} configured`);
     }
     // secrets are never given literal values
     assert.match(text, /- key: ADMIN_PASSWORD[^\n]*\n\s*sync: false/);
     assert.match(text, /- key: SESSION_SECRET[^\n]*\n\s*generateValue: true/);
     assert.doesNotMatch(text, /ADMIN_PASSWORD[^\n]*\n\s*value:/);
+    assert.doesNotMatch(text, /maxShutdownDelaySeconds/, 'rejected by the Render free plan');
   });
 });

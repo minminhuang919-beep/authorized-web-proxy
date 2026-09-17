@@ -14,7 +14,8 @@
     "test": "node --test \"test/**/*.test.js\"",
     "test:coverage": "node --test --experimental-test-coverage \"test/**/*.test.js\"",
     "lint": "eslint .",
-    "check": "npm run lint && npm test"
+    "check": "npm run lint && npm test",
+    "hash-password": "node src/tools/hash-password.js"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

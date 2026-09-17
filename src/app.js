@@ -10,7 +10,10 @@ import Fastify, { LogController } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyRateLimit from '@fastify/rate-limit';
 import { Allowlist } from './allowlist.js';
+import { AuditLog } from './audit.js';
+import { Blacklist } from './blacklist.js';
 import { ProxyError, TooManyRequestsError } from './errors.js';
+import { createAccessPolicy } from './policy.js';
 import { loggerOptions, safePath } from './logger.js';
 import { createUrlRewriter } from './rewrite/url.js';
 import { SessionStore } from './sessions.js';
@@ -54,6 +57,18 @@ export async function buildApp({ config, deps = {} }) {
       logger: app.log
     }).load());
 
+  const blacklist =
+    deps.blacklist ??
+    (await new Blacklist({
+      envValue: config.blacklistEnv,
+      filePath: config.blacklistFile, // null → in-memory only (ephemeral hosts)
+      logger: app.log
+    }).load());
+
+  // Order of checks: authorized scope → blacklist → (later) SSRF address policy.
+  const policy = createAccessPolicy({ allowlist, blacklist });
+  const audit = new AuditLog({ max: 50 });
+
   const sessions = new SessionStore({ ttlMs: config.sessionTtlMs, max: config.sessionMax });
   sessions.start();
 
@@ -70,6 +85,9 @@ export async function buildApp({ config, deps = {} }) {
 
   app.decorate('config', config);
   app.decorate('allowlist', allowlist);
+  app.decorate('blacklist', blacklist);
+  app.decorate('policy', policy);
+  app.decorate('audit', audit);
   app.decorate('sessions', sessions);
   app.decorate('upstream', upstream);
   app.decorate('urlRewriter', urlRewriter);
@@ -82,7 +100,8 @@ export async function buildApp({ config, deps = {} }) {
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       node: process.version,
       platform: `${process.platform}/${process.arch}`,
-      allowlist: { size: allowlist.size },
+      allowlist: { size: allowlist.size, persistent: Boolean(allowlist.filePath) },
+      blacklist: { size: blacklist.size, persistent: blacklist.persistent },
       sessions: sessions.stats(),
       upstream: { ...upstream.stats },
       memory: { rss: mem.rss, heapUsed: mem.heapUsed, heapTotal: mem.heapTotal }

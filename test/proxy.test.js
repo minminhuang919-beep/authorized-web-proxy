@@ -14,14 +14,18 @@ describe('proxy', () => {
 
   const get = (url, headers = {}) => ctx.app.inject({ method: 'GET', url, headers });
 
-  test('homepage renders with the form and allowlist', async () => {
+  test('homepage renders the search-engine style form', async () => {
     const res = await get('/');
     assert.equal(res.statusCode, 200);
     assert.match(res.headers['content-type'], /text\/html/);
-    assert.match(res.body, /<form class="open-form"/);
-    assert.match(res.body, /name="url"/);
-    assert.match(res.body, /site\.test/);
-    assert.match(res.body, /authorized/i);
+    assert.match(res.body, /<form class="search[^"]*" method="get" action="\/open"/);
+    assert.match(res.body, /class="wordmark">AnonView</);
+    assert.match(res.body, /name="url"[^>]*placeholder="Enter a website or URL/);
+    assert.match(res.body, /Fast private browsing for authorized websites\./);
+    assert.match(res.body, /href="\/about"/);
+    assert.doesNotMatch(res.body, /href="\/admin"/, 'Admin link hidden for visitors');
+    assert.doesNotMatch(res.body, /No websites have been authorized/);
+    assert.match(res.body, /data-theme-toggle/);
     assert.ok(res.headers['content-security-policy'], 'CSP present on own pages');
     assert.equal(res.headers['x-content-type-options'], 'nosniff');
     assert.equal(res.headers['x-frame-options'], 'SAMEORIGIN');
@@ -33,14 +37,16 @@ describe('proxy', () => {
     assert.equal(res.headers.location, '/p/https/site.test/page?a=1');
   });
 
-  test('/open explains blocked domains and invalid input inline', async () => {
+  test('/open explains blocked domains and invalid input', async () => {
     let res = await get('/open?url=https%3A%2F%2Fnot-allowed.example%2F');
     assert.equal(res.statusCode, 403);
+    assert.match(res.body, /Website not authorized/);
     assert.match(res.body, /not-allowed\.example/);
     assert.match(res.body, /not on this proxy/);
     res = await get('/open?url=');
     assert.equal(res.statusCode, 400);
     assert.match(res.body, /enter a web address/i);
+    assert.match(res.body, /search-box has-error/, 'inline error state on the homepage');
     res = await get('/open?url=http%3A%2F%2F%5Bbad');
     assert.equal(res.statusCode, 400);
     res = await get('/open?url=<script>alert(1)</script>');

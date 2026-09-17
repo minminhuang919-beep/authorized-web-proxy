@@ -6,20 +6,23 @@
  * Embedding the scheme and host in the path means the browser resolves
  * page-relative links correctly on its own.
  */
-import { DomainNotAllowedError, InvalidUrlError, UnsupportedProtocolError } from '../errors.js';
-import { isSpecialUseHostname, normalizeHostname } from './hostname.js';
+import { InvalidUrlError, UnsupportedProtocolError } from '../errors.js';
+import { asPolicy } from '../policy.js';
+import { normalizeHostname } from './hostname.js';
 
 export const PROXY_PREFIX = '/p/';
 const SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
 
 /**
- * Validate an absolute URL against the proxy's rules and the allowlist.
- * Returns a normalised copy (lower-case host, no credentials, default port).
+ * Validate an absolute URL against the proxy's rules and the access policy
+ * (authorized scope first, then the blacklist). Returns a normalised copy
+ * (lower-case host, no credentials, default port). SSRF address checks happen
+ * later, at connection time.
  * @param {URL} url
- * @param {import('../allowlist.js').Allowlist} allowlist
+ * @param {object} policy access policy from policy.js (a bare Allowlist is accepted too)
  * @returns {URL}
  */
-export function validateTarget(url, allowlist) {
+export function validateTarget(url, policy) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new UnsupportedProtocolError(url.protocol.replace(/:$/, ''));
   }
@@ -33,9 +36,7 @@ export function validateTarget(url, allowlist) {
   if (!host) {
     throw new InvalidUrlError('The address must contain a valid domain name (IP addresses are not supported).');
   }
-  if (isSpecialUseHostname(host) || !allowlist.isAllowed(host)) {
-    throw new DomainNotAllowedError(host);
-  }
+  asPolicy(policy).assertPermitted(host);
   const clean = new URL(url.href);
   clean.hostname = host;
   clean.username = '';
@@ -47,10 +48,10 @@ export function validateTarget(url, allowlist) {
 /**
  * Turn whatever the user typed into the homepage box into a validated URL.
  * @param {string} input
- * @param {import('../allowlist.js').Allowlist} allowlist
+ * @param {object} policy access policy (or bare allowlist)
  * @param {{ maxLength?: number }} [opts]
  */
-export function parseUserUrl(input, allowlist, { maxLength = 4096 } = {}) {
+export function parseUserUrl(input, policy, { maxLength = 4096 } = {}) {
   if (typeof input !== 'string') throw new InvalidUrlError();
   let text = input.trim();
   if (!text) throw new InvalidUrlError('Please enter a web address.');
@@ -64,7 +65,7 @@ export function parseUserUrl(input, allowlist, { maxLength = 4096 } = {}) {
   } catch {
     throw new InvalidUrlError();
   }
-  return validateTarget(url, allowlist);
+  return validateTarget(url, policy);
 }
 
 /**
@@ -102,10 +103,10 @@ export function splitProxyPath(rawUrl) {
 /**
  * Resolve a raw proxy request URL into a validated upstream target.
  * @param {string} rawUrl
- * @param {import('../allowlist.js').Allowlist} allowlist
+ * @param {object} policy access policy (or bare allowlist)
  * @returns {{ target: URL, scheme: string, host: string, rest: string }}
  */
-export function targetFromProxyPath(rawUrl, allowlist, { maxLength = 4096 } = {}) {
+export function targetFromProxyPath(rawUrl, policy, { maxLength = 4096 } = {}) {
   const parts = splitProxyPath(rawUrl);
   if (!parts) throw new InvalidUrlError();
   if (rawUrl.length > maxLength) throw new InvalidUrlError('That address is too long.');
@@ -117,6 +118,6 @@ export function targetFromProxyPath(rawUrl, allowlist, { maxLength = 4096 } = {}
   } catch {
     throw new InvalidUrlError();
   }
-  const target = validateTarget(url, allowlist);
+  const target = validateTarget(url, policy);
   return { target, scheme: parts.scheme, host, rest: parts.rest };
 }
