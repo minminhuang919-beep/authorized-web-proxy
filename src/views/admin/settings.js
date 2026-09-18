@@ -16,7 +16,7 @@ export function settingsPage({ scope, persistent, settings, csrfToken, notice = 
   <div class="card-head">
     <h2 id="scope-title">Authorized scope <span class="count">${scope.length}</span></h2>
   </div>
-  <p class="muted">The websites visitors are allowed to open. Everything outside this scope is refused — the blacklist only narrows it further. <code>example.com</code> matches exactly that host; <code>*.example.com</code> matches its subdomains (list both for both). Entries from <code>PROXY_ALLOWED_DOMAINS</code> are locked.</p>
+  <p class="muted">The websites visitors are allowed to open. Everything outside this scope is refused — the blacklist only narrows it further. <code>example.com</code> matches exactly that host; <code>*.example.com</code> matches its subdomains (list both for both); <code>*</code> alone authorizes every website. Entries from <code>PROXY_ALLOWED_DOMAINS</code> are locked.</p>
   <form method="post" action="/admin/domains" class="add-form">
     <input type="hidden" name="_csrf" value="${csrfToken}">
     <label class="field grow">

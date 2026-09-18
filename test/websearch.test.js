@@ -300,3 +300,53 @@ describe('deployment keeps SearXNG private', () => {
     assert.match(compose, /SEARXNG_EMBEDDED: "false"/);
   });
 });
+
+describe('PROXY_ALLOWED_DOMAINS=* authorizes every website', () => {
+  let api;
+  let ctx;
+  before(async () => {
+    api = await createMockSearch().start();
+    ctx = await createTestApp({ env: { PROXY_ALLOWED_DOMAINS: '*', PROXY_BLACKLIST: 'cdn.test', SEARCH_PROVIDER: 'searxng', SEARXNG_URL: api.url, SEARCH_TIMEOUT: '1' } });
+  });
+  after(async () => {
+    await ctx.close();
+    await api.stop();
+  });
+  const get = (url) => ctx.app.inject({ method: 'GET', url });
+
+  test('any hostname is inside the scope; blacklist and SSRF checks still apply', async () => {
+    assert.equal(ctx.app.allowlist.allowsAll, true);
+    assert.equal(ctx.app.allowlist.isAllowed('anything.example'), true);
+    assert.equal(ctx.app.allowlist.isAllowed('deep.sub.domain.example.co.uk'), true);
+    let res = await get('/search?q=outside.example');
+    assert.equal(res.statusCode, 302, 'a domain never seen before opens through the proxy');
+    assert.equal(res.headers.location, '/p/https/outside.example/');
+    res = await get('/open?url=http%3A%2F%2Fcdn.test%2Fasset');
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body, /Website unavailable/, 'blacklist still wins');
+    res = await get('/p/http/meta.test/latest/');
+    assert.equal(res.statusCode, 403, 'SSRF address check still wins');
+    res = await get('/open?url=http%3A%2F%2F169.254.169.254%2F');
+    assert.equal(res.statusCode, 400, 'IP literals still refused');
+    assert.equal(ctx.mock.requests.length, 0);
+  });
+
+  test('search results are all marked "via proxy" except blacklisted ones; a bare word is still a search', async () => {
+    let res = await get('/search?q=hockey');
+    assert.equal(res.statusCode, 200);
+    assert.doesNotMatch(res.body, /is-unauthorized/);
+    assert.match(res.body, /is-proxied/);
+    assert.match(res.body, /is-blocked/);
+    res = await get('/search?q=geoguessr');
+    assert.equal(res.statusCode, 200);
+    assert.match(res.body, /Search results for geoguessr/);
+    const about = await get('/about');
+    assert.match(about.body, /Every website is authorized/);
+  });
+
+  test('* is only valid on its own; partial wildcards are still refused', async () => {
+    assert.equal(ctx.app.allowlist.isAllowed(''), false);
+    await assert.rejects(createTestApp({ withMock: false, env: { PROXY_ALLOWED_DOMAINS: 'ex*.com' } }), /invalid entry/);
+    await assert.rejects(createTestApp({ withMock: false, env: { PROXY_ALLOWED_DOMAINS: '**' } }), /invalid entry/);
+  });
+});

@@ -41,8 +41,10 @@ services:
         value: info
 
       # ---- required: entered in the Render dashboard (never committed) ------------
-      - key: PROXY_ALLOWED_DOMAINS    # e.g. example.com,*.example.com
-        sync: false
+      # `*` authorizes every website (blacklist + SSRF checks still apply).
+      # Replace with a list such as example.com,*.example.com to restrict it.
+      - key: PROXY_ALLOWED_DOMAINS
+        value: "*"
       - key: ADMIN_USERNAME
         sync: false
       - key: ADMIN_PASSWORD           # at least 12 characters (or set ADMIN_PASSWORD_HASH instead, see README)

@@ -30,7 +30,9 @@ test('allowlist patterns parse and match strictly', () => {
   assert.equal(parseAllowlistPattern('1.2.3.4'), null);
   assert.equal(parseAllowlistPattern('*.*.com'), null);
   assert.equal(parseAllowlistPattern('example.com:8080'), null);
-  assert.equal(parseAllowlistPattern('*'), null);
+  assert.deepEqual(parseAllowlistPattern('*'), { pattern: '*', wildcard: true, host: '*' }, 'bare * = every website');
+  assert.equal(parseAllowlistPattern('**'), null);
+  assert.equal(parseAllowlistPattern('*example.com'), null);
 
   const list = new Allowlist({ envDomains: ['example.com', '*.wild.example'] });
   assert.equal(list.isAllowed('example.com'), true);

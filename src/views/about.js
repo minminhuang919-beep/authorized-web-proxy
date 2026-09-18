@@ -49,7 +49,9 @@ export function aboutPage({ scope, showScope, shortcuts = [], searchEnabled = fa
       <p>Only websites an administrator has authorized can be opened. Anything else shows a “Website not authorized” page — AnonView is not an open proxy.</p>
       ${
         showScope
-          ? scope.length
+          ? scope.includes('*')
+            ? html`<p>Every website is authorized. The administrator's blacklist and the network safety checks still apply.</p>`
+            : scope.length
             ? html`<ul class="chip-list" aria-label="Authorized websites">${scope.map((p) => html`<li>${p.startsWith('*.') ? html`<span class="chip">${p}</span>` : html`<a class="chip" href="/open?url=${encodeURIComponent(`https://${p}/`)}">${p}</a>`}</li>`)}</ul>`
             : html`<p class="muted">No websites have been authorized yet.</p>`
           : ''

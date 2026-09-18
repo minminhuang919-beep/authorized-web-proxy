@@ -27,6 +27,7 @@
     host = String(host || '').toLowerCase();
     for (var i = 0; i < allowed.length; i++) {
       var p = allowed[i];
+      if (p === '*') return true;
       if (p.indexOf('*.') === 0) {
         var suffix = p.slice(1);
         if (host.length > suffix.length && host.slice(-suffix.length) === suffix) return true;

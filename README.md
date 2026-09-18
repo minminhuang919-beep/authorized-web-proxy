@@ -189,7 +189,7 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 | `LOG_LEVEL` | `info` | pino log level. |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` from the reverse proxy (`true` on Render / docker-compose; a number = proxy hop count). |
 | `CLIENT_IP_HEADER` | *(empty)* | Header set by a trusted edge with the real client IP, used for rate limiting (`true-client-ip` on Render). |
-| `PROXY_ALLOWED_DOMAINS` | *(empty)* | The **authorized scope**, comma-separated, e.g. `example.com,*.example.com`. |
+| `PROXY_ALLOWED_DOMAINS` | *(empty)* | The **authorized scope**, comma-separated, e.g. `example.com,*.example.com`. A bare `*` authorizes **every website** (render.yaml and .env.example default); the blacklist and SSRF checks still apply. |
 | `PROXY_BLACKLIST` | *(empty)* | Blacklisted domains inside the scope, comma-separated, optional `\|reason`: `ads.example.com\|Not permitted,tracker.example`. |
 | `PROXY_SITES` | *(empty)* | Permanent **site shortcuts**, comma-separated `shortcut=destination\|Name\|Description` (name/description optional, leading `!` = disabled): `google=https://google.com\|Google\|Google Search,yt=https://youtube.com\|YouTube`. Destinations must be inside the scope. |
 | `SEARCH_PROVIDER` | `none` | Web search backend for the homepage box: `none` (off), `searxng` (self-hosted, what the Docker image and render.yaml use), `brave`, `google` or `proxy`. See §5. |
@@ -555,7 +555,7 @@ non-secret variables and marks these for you to enter:
 
 | Variable | What to enter |
 |---|---|
-| `PROXY_ALLOWED_DOMAINS` | The sites visitors may open, comma-separated, e.g. `example.com,*.example.com,docs.python.org` |
+| `PROXY_ALLOWED_DOMAINS` | Preset to `*` (every website). Replace with a comma-separated list such as `example.com,*.example.com,docs.python.org` to restrict the scope |
 | `ADMIN_USERNAME` | Your admin login name, e.g. `admin` |
 | `ADMIN_PASSWORD` | A strong password, **at least 12 characters**, not containing "password"/"admin"/"changeme" |
 | `SESSION_SECRET` | Leave it to Render — the Blueprint has `generateValue: true`, which creates a random 256-bit value that persists across deploys. (Manual flow: click *Generate* or paste `openssl rand -hex 32`.) |
@@ -717,7 +717,7 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 | "Search is temporarily unavailable" | Logs show `search provider unreachable` / `search provider error` with the host and HTTP status: wrong `SEARXNG_URL`/`SEARCH_URL`/API key, SearXNG without `json` in `search.formats`, quota exhausted (429), or a timeout (`SEARCH_TIMEOUT`). In the Docker image, check the `[entrypoint] starting embedded SearXNG` line and any SearXNG errors above it. |
 | Start-up fails mentioning `PROXY_SITES` | An entry is malformed (`shortcut=destination`), has an invalid shortcut (letters, digits, `-`, `_` only), a duplicate shortcut, or an invalid destination (IP, port, credentials, non-http scheme). Out-of-scope destinations only log a warning. |
 | First request after a pause is slow | Free-tier spin-down (§11). |
-| Website not authorized | Add the domain (and its subdomains with `*.`) to `PROXY_ALLOWED_DOMAINS`. |
+| Website not authorized | Add the domain (and its subdomains with `*.`) to `PROXY_ALLOWED_DOMAINS`, or set it to `*` to authorize every website. |
 | A page looks broken | Its assets may come from an unlisted CDN (allow it) or it relies on WebSockets/service workers (unsupported). |
 | `503 The proxy is busy` | `MAX_CONCURRENT_UPSTREAM` reached — raise it or check for a slow upstream. |
 | `429 Too many requests` for a legitimate user | Raise `RATE_LIMIT`; on Render the limiter keys on `True-Client-IP`. |

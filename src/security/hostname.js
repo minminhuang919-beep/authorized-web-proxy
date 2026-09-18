@@ -55,11 +55,16 @@ export function isSpecialUseHostname(host) {
 
 /**
  * Validate an allowlist pattern such as `example.com` or `*.example.com`.
+ * The single pattern `*` authorizes every website (the blacklist and the
+ * SSRF address checks still apply).
  * @returns {{ pattern: string, wildcard: boolean, host: string }|null}
  */
+export const ALL_WEBSITES = '*';
+
 export function parseAllowlistPattern(value) {
   if (typeof value !== 'string') return null;
   let pattern = value.trim().toLowerCase();
+  if (pattern === ALL_WEBSITES) return { pattern: ALL_WEBSITES, wildcard: true, host: ALL_WEBSITES };
   if (pattern.startsWith('https://') || pattern.startsWith('http://')) {
     pattern = pattern.replace(/^https?:\/\//, '').split('/')[0];
   }

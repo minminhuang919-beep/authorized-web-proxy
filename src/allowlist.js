@@ -7,11 +7,13 @@
  *  - entries added through the admin UI, persisted to `<DATA_DIR>/allowlist.json`.
  *
  * Matching is strict: `example.com` matches only `example.com`;
- * `*.example.com` matches any subdomain but not the bare domain.
+ * `*.example.com` matches any subdomain but not the bare domain. The single
+ * pattern `*` authorizes every website; the blacklist and the SSRF address
+ * checks still apply on top of it.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { parseAllowlistPattern } from './security/hostname.js';
+import { ALL_WEBSITES, parseAllowlistPattern } from './security/hostname.js';
 
 export class Allowlist {
   /**
@@ -85,6 +87,7 @@ export class Allowlist {
    */
   isAllowed(hostname) {
     if (typeof hostname !== 'string' || !hostname) return false;
+    if (this.entries.has(ALL_WEBSITES)) return true;
     const host = hostname.toLowerCase();
     if (this.entries.has(host) && !this.entries.get(host).wildcard) return true;
     let idx = host.indexOf('.');
@@ -100,6 +103,11 @@ export class Allowlist {
   /** All patterns (for display / the client-side shim). */
   patterns() {
     return [...this.entries.keys()];
+  }
+
+  /** True when the `*` pattern authorizes every website. */
+  get allowsAll() {
+    return this.entries.has(ALL_WEBSITES);
   }
 
   list() {
