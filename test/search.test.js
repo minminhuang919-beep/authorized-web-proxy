@@ -19,8 +19,13 @@ describe('search configuration', () => {
   test('search is off unless SEARCH_PROVIDER is set, and each provider validates its settings', () => {
     assert.equal(loadConfig(base).search.provider, 'none');
     assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'bing' }), /SEARCH_PROVIDER/);
-    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng' }), /SEARCH_URL/);
+    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng' }), /SEARXNG_URL/);
+    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARXNG_URL: 'searx.example' }), /SEARXNG_URL must be an http/);
     assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARCH_URL: 'searx.example' }), /http/);
+    // SEARXNG_URL is the documented name; SEARCH_URL stays accepted as an alias and loses when both are set.
+    assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARXNG_URL: 'http://127.0.0.1:8888' }).search.url, 'http://127.0.0.1:8888');
+    assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARXNG_URL: 'http://127.0.0.1:8888', SEARCH_URL: 'http://other:1' }).search.url, 'http://127.0.0.1:8888');
+    assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'brave', SEARCH_API_KEY: 'k', SEARXNG_URL: 'http://127.0.0.1:8888' }).search.url, '');
     assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'brave' }), /SEARCH_API_KEY/);
     assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'google', SEARCH_API_KEY: 'k' }), /SEARCH_ENGINE_ID/);
     assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'proxy', SEARCH_URL: 'https://duckduckgo.com/html/' }), /\{q\}/);
@@ -113,7 +118,7 @@ describe('search providers and the results page', () => {
   const get = (ctx, url, headers = {}) => ctx.app.inject({ method: 'GET', url, headers });
 
   test('searxng: results page with proxied, unauthorized and blocked results, related searches and paging', async () => {
-    await withApp({ SEARCH_PROVIDER: 'searxng', SEARCH_URL: api.url }, async (ctx) => {
+    await withApp({ SEARCH_PROVIDER: 'searxng', SEARXNG_URL: api.url }, async (ctx) => {
       const home = await get(ctx, '/');
       assert.match(home.body, /data-search-enabled="1"/);
       assert.match(home.body, /placeholder="Search the web or open a configured site/);
@@ -177,7 +182,7 @@ describe('search providers and the results page', () => {
   });
 
   test('searxng: empty, error, invalid JSON, rate-limited and timeout states', async () => {
-    await withApp({ SEARCH_PROVIDER: 'searxng', SEARCH_URL: api.url }, async (ctx) => {
+    await withApp({ SEARCH_PROVIDER: 'searxng', SEARXNG_URL: api.url }, async (ctx) => {
       let res = await get(ctx, '/search?q=empty');
       assert.equal(res.statusCode, 200);
       assert.match(res.body, /No results for “empty”/);
@@ -186,7 +191,7 @@ describe('search providers and the results page', () => {
       assert.match(res.body, /No more results/);
       res = await get(ctx, '/search?q=fail');
       assert.equal(res.statusCode, 502);
-      assert.match(res.body, /Search is unavailable right now/);
+      assert.match(res.body, /Search is temporarily unavailable/);
       assert.match(res.body, /temporarily unavailable/);
       assert.match(res.body, /href="\/search\?q=fail&amp;mode=search">Try again/);
       assert.doesNotMatch(res.body, /boom|127\.0\.0\.1/, 'no provider details leak');
@@ -234,7 +239,7 @@ describe('search providers and the results page', () => {
   });
 
   test('shortcuts and addresses still win over search; mode=search forces a search', async () => {
-    await withApp({ SEARCH_PROVIDER: 'searxng', SEARCH_URL: api.url, PROXY_SITES: 'google=http://site.test/|Google' }, async (ctx) => {
+    await withApp({ SEARCH_PROVIDER: 'searxng', SEARXNG_URL: api.url, PROXY_SITES: 'google=http://site.test/|Google' }, async (ctx) => {
       let res = await get(ctx, '/search?q=google');
       assert.equal(res.statusCode, 302);
       assert.equal(res.headers.location, '/p/http/site.test/');
@@ -254,7 +259,7 @@ describe('search providers and the results page', () => {
   });
 
   test('PROXY_UNLISTED_URL_MODE does not change the results page: results never link out directly', async () => {
-    await withApp({ SEARCH_PROVIDER: 'searxng', SEARCH_URL: api.url, PROXY_UNLISTED_URL_MODE: 'direct' }, async (ctx) => {
+    await withApp({ SEARCH_PROVIDER: 'searxng', SEARXNG_URL: api.url, PROXY_UNLISTED_URL_MODE: 'direct' }, async (ctx) => {
       const res = await get(ctx, '/search?q=hockey');
       assert.match(res.body, /<li class="result is-unauthorized">[\s\S]*?<a href="\/open\?url=https%3A%2F%2Foutside\.example%2Fpage">Outside<\/a>/);
       assert.doesNotMatch(res.body, /href="https:\/\/outside\.example/);
@@ -262,7 +267,7 @@ describe('search providers and the results page', () => {
   });
 
   test('searches are rate limited separately from the proxy', async () => {
-    await withApp({ SEARCH_PROVIDER: 'searxng', SEARCH_URL: api.url, SEARCH_RATE_LIMIT: '2' }, async (ctx) => {
+    await withApp({ SEARCH_PROVIDER: 'searxng', SEARXNG_URL: api.url, SEARCH_RATE_LIMIT: '2' }, async (ctx) => {
       assert.equal((await get(ctx, '/search?q=hockey')).statusCode, 200);
       assert.equal((await get(ctx, '/search?q=hockey')).statusCode, 200);
       const limited = await get(ctx, '/search?q=hockey');

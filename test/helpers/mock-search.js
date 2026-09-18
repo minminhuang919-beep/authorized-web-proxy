@@ -7,6 +7,19 @@ import http from 'node:http';
 
 export const RESULT_URLS = ['http://site.test/landing', 'https://outside.example/page', 'http://cdn.test/asset', 'http://site.test/landing#dup', 'ftp://site.test/file', 'not a url'];
 
+export const CHAIN_RESULTS = [
+  { title: 'Authorized', url: 'http://site.test/landing', snippet: 'Inside the scope' },
+  { title: 'Unauthorized', url: 'https://outside.example/page', snippet: 'Outside the scope' },
+  { title: 'Blacklisted', url: 'http://cdn.test/asset', snippet: 'Blacklisted host' },
+  { title: 'Metadata service', url: 'http://meta.test/latest/meta-data/', snippet: 'Resolves to 169.254.169.254' },
+  { title: 'Private network', url: 'http://evil.test/admin', snippet: 'Resolves to 10.0.0.5' },
+  { title: 'Loopback v6', url: 'http://loop6.test/', snippet: 'Resolves to ::1' },
+  { title: 'Redirects outside', url: 'http://site.test/redirect/blocked', snippet: 'Authorized page that redirects to an unauthorized site' },
+  { title: 'Redirects to private', url: 'http://site.test/redirect/private', snippet: 'Authorized page that redirects to a private address' },
+  { title: 'Redirects to a port', url: 'http://site.test/redirect/port', snippet: 'Authorized page that redirects to a port' },
+  { title: 'Redirects inside', url: 'http://site.test/redirect/allowed', snippet: 'Authorized page that redirects within the scope' }
+];
+
 function results(page) {
   const suffix = page > 1 ? ` (page ${page})` : '';
   return [
@@ -41,6 +54,14 @@ export function createMockSearch() {
       }, 2500).unref();
     }
     const empty = q === 'empty';
+    // "chain": results whose destinations exercise the full open chain
+    // (authorized, unauthorized, blacklisted, SSRF, redirect-to-unauthorized).
+    if (q === 'chain' && url.pathname === '/search') {
+      return json(200, {
+        query: q,
+        results: CHAIN_RESULTS.map((r) => ({ title: r.title, url: r.url, content: r.snippet, engine: 'mock' }))
+      });
+    }
     switch (url.pathname) {
       case '/search': {
         const page = Number(url.searchParams.get('pageno') || 1);

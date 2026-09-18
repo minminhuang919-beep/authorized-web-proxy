@@ -60,7 +60,7 @@ describe('routing through the search box', () => {
   let ctx;
   before(async () => {
     api = await createMockSearch().start();
-    ctx = await createTestApp({ env: { PROXY_SITES: SITES, PROXY_BLACKLIST: 'cdn.test', SEARCH_PROVIDER: 'searxng', SEARCH_URL: api.url, SEARCH_TIMEOUT: '2' } });
+    ctx = await createTestApp({ env: { PROXY_SITES: SITES, PROXY_BLACKLIST: 'cdn.test', SEARCH_PROVIDER: 'searxng', SEARXNG_URL: api.url, SEARCH_TIMEOUT: '2' } });
   });
   after(async () => {
     await ctx.close();

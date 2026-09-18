@@ -1,11 +1,14 @@
 # AnonView proxy — local Docker stack (development / self-hosting).
 #
-#   app    Node.js proxy (non-root, read-only filesystem, internal port only)
-#   caddy  local TLS edge: HTTP on :80 by default; with DOMAIN set, automatic
-#          Let's Encrypt certificates and HTTP→HTTPS redirect.
+#   app      Node.js proxy (non-root, read-only filesystem, internal port only)
+#   searxng  private SearXNG search backend: internal network only, no
+#            published port, reachable solely as http://searxng:8080 from `app`
+#   caddy    local TLS edge: HTTP on :80 by default; with DOMAIN set, automatic
+#            Let's Encrypt certificates and HTTP→HTTPS redirect.
 #
 # Production hosting uses Render (see render.yaml) which builds the same
-# Dockerfile and terminates TLS itself — Caddy is not used there.
+# Dockerfile and terminates TLS itself — Caddy is not used there, and SearXNG
+# runs embedded inside the app container (see Dockerfile) instead.
 #
 # Configuration comes from `.env` (copy `.env.example`). Never commit `.env`.
 
@@ -26,6 +29,13 @@ services:
       PORT: "8080"
       TRUST_PROXY: "true"
       DATA_DIR: /data
+      # Web search through the private searxng service below (overrides .env).
+      SEARCH_PROVIDER: searxng
+      SEARXNG_URL: http://searxng:8080
+      SEARXNG_EMBEDDED: "false"
+    depends_on:
+      searxng:
+        condition: service_started
     expose:
       - "8080"
     volumes:
@@ -41,6 +51,40 @@ services:
       resources:
         limits:
           memory: 768M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - internal
+
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: anonview-searxng
+    restart: unless-stopped
+    environment:
+      # Listen on the container's internal interface only; nothing publishes it.
+      SEARXNG_BIND_ADDRESS: "0.0.0.0"
+      SEARXNG_PORT: "8080"
+      SEARXNG_BASE_URL: http://searxng:8080/
+      # Set SEARXNG_SECRET in .env (any long random string).
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng_cache:/var/cache/searxng
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     logging:
       driver: json-file
       options:
@@ -85,6 +129,7 @@ services:
 
 volumes:
   app_data:
+  searxng_cache:
   caddy_data:
   caddy_config:
 

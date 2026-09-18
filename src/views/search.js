@@ -95,7 +95,7 @@ function errorBlock({ query, page, message }) {
   return html`
 <div class="state-card rise" role="alert">
   <div class="state-icon is-warn">${icons.alert}</div>
-  <h2>Search is unavailable right now</h2>
+  <h2>Search is temporarily unavailable</h2>
   <p class="muted">${message}</p>
   <p class="actions"><a class="btn btn-primary" href="${searchHref(query, { page })}">Try again</a><a class="btn btn-ghost" href="/">Back to start</a></p>
 </div>`;

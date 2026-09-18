@@ -15,6 +15,8 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
+    # The embedded SearXNG adds ~150 MB RSS; NODE_OPTIONS in the Dockerfile
+    # caps Node's heap so both fit in the free plan's 512 MB.
     autoDeploy: true
     envVars:
       # ---- runtime (do not change) ------------------------------------------------
@@ -77,11 +79,22 @@ services:
         value: "true"
 
       # ---- search box: shortcuts and web search -----------------------------------
-      # Web search is off until a provider is chosen: none | searxng | brave |
-      # google | proxy. Depending on the provider also add SEARCH_URL,
-      # SEARCH_API_KEY and SEARCH_ENGINE_ID in the Environment tab (see README §5).
+      # Web search runs on a private SearXNG instance embedded in this same
+      # container (Dockerfile + deploy/docker-entrypoint.sh): it binds to
+      # 127.0.0.1 only, so it is never reachable from the internet and needs no
+      # second Render service (the free plan has no private services). No API
+      # key or card is required. Set SEARCH_PROVIDER=none to switch search off,
+      # or brave/google/proxy with the extra variables described in README §5.
       - key: SEARCH_PROVIDER
-        value: none
+        value: searxng
+      - key: SEARXNG_URL
+        value: http://127.0.0.1:8888
+      - key: SEARXNG_EMBEDDED
+        value: "true"
+      - key: SEARXNG_PORT
+        value: "8888"
+      - key: SEARXNG_SECRET           # SearXNG's own secret key, generated once by Render
+        generateValue: true
       - key: SEARCH_TIMEOUT
         value: "10"
       - key: SEARCH_RATE_LIMIT

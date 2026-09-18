@@ -149,14 +149,17 @@ export function loadConfig(env = process.env) {
   if (!['none', 'searxng', 'brave', 'google', 'proxy'].includes(searchProvider)) {
     throw new ConfigError('SEARCH_PROVIDER must be one of: none, searxng, brave, google, proxy');
   }
-  const searchUrl = pick(env, 'SEARCH_URL', '').trim();
+  // SearXNG's base URL is SEARXNG_URL; SEARCH_URL is the generic name shared
+  // with the other providers and remains accepted as an alias.
+  const searxngUrl = pick(env, 'SEARXNG_URL', '').trim();
+  const searchUrl = (searchProvider === 'searxng' && searxngUrl ? searxngUrl : pick(env, 'SEARCH_URL', '')).trim();
   const searchApiKey = pick(env, 'SEARCH_API_KEY', '').trim();
   const searchEngineId = pick(env, 'SEARCH_ENGINE_ID', '').trim();
   if (searchUrl && !isHttpUrl(searchUrl.replaceAll('{q}', 'q'))) {
-    throw new ConfigError('SEARCH_URL must be an http:// or https:// URL');
+    throw new ConfigError(`${searchProvider === 'searxng' ? 'SEARXNG_URL' : 'SEARCH_URL'} must be an http:// or https:// URL`);
   }
   if (searchProvider === 'searxng' && !searchUrl) {
-    throw new ConfigError('SEARCH_URL (the base URL of the SearXNG instance) is required when SEARCH_PROVIDER=searxng');
+    throw new ConfigError('SEARXNG_URL (the base URL of the SearXNG instance, e.g. http://127.0.0.1:8888) is required when SEARCH_PROVIDER=searxng');
   }
   if ((searchProvider === 'brave' || searchProvider === 'google') && !searchApiKey) {
     throw new ConfigError(`SEARCH_API_KEY is required when SEARCH_PROVIDER=${searchProvider}`);
