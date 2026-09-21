@@ -1,16 +1,21 @@
 /**
- * Web search for the homepage box. Search is OFF unless the administrator
- * sets SEARCH_PROVIDER explicitly:
+ * Web search for the homepage box. The application only ever talks to a
+ * search *backend* over HTTP — it never embeds or supervises one. Search is
+ * OFF unless the administrator sets SEARCH_PROVIDER explicitly:
  *
  *   none     no search: queries get a "not configured" page (default)
- *   searxng  a SearXNG instance's JSON API (SEARCH_URL = its base URL;
- *            `json` must be enabled in its `search.formats`)
+ *   searxng  a SearXNG instance's JSON API (SEARCH_PROVIDER_URL = its base
+ *            URL; `json` must be enabled in its `search.formats`)
  *   brave    Brave Search API (SEARCH_API_KEY)
  *   google   Google Programmable Search JSON API (SEARCH_API_KEY + SEARCH_ENGINE_ID)
  *   proxy    no API: the query is opened on a search *website* through the
- *            proxy itself (SEARCH_URL = URL template with `{q}`, whose host
- *            must be inside the authorized scope, e.g.
+ *            proxy itself (SEARCH_PROVIDER_URL = URL template with `{q}`,
+ *            whose host must be inside the authorized scope, e.g.
  *            https://duckduckgo.com/html/?q={q})
+ *
+ * A provider whose required settings are missing stays disabled (with the
+ * reason from config.search.reason) instead of failing the process, so an
+ * incomplete search configuration never takes the proxy itself down.
  *
  * Nothing is scraped: the API providers are documented JSON APIs, and
  * `proxy` mode just renders a website the visitor asked for, like any other
@@ -161,11 +166,18 @@ export function createSearchProvider({ config, policy, logger = null, fetchImpl 
   const settings = config.search;
   const kind = settings.provider;
 
-  if (kind === 'none') {
+  // `none`, or a provider that is missing a required setting: inert, and the
+  // results page explains that search is not configured.
+  if (kind === 'none' || !settings.configured) {
+    if (kind !== 'none') {
+      logger?.warn({ provider: kind, reason: settings.reason }, 'search provider is not fully configured: web search is disabled');
+    }
     return {
       kind,
       label: '',
       enabled: false,
+      configured: settings.configured,
+      reason: settings.reason,
       mode: 'off',
       async search() {
         throw new SearchUnavailableError('Search is not configured on this proxy.');
@@ -190,12 +202,14 @@ export function createSearchProvider({ config, policy, logger = null, fetchImpl 
           : err.code === 'DOMAIN_BLACKLISTED'
             ? `"${host}" is blacklisted`
             : err.message;
-      throw new ConfigError(`SEARCH_URL cannot be used with SEARCH_PROVIDER=proxy: ${why}`, { cause: err });
+      throw new ConfigError(`SEARCH_PROVIDER_URL cannot be used with SEARCH_PROVIDER=proxy: ${why}`, { cause: err });
     }
     return {
       kind,
       label: probe.hostname,
       enabled: true,
+      configured: true,
+      reason: '',
       mode: 'redirect',
       async search() {
         throw new SearchUnavailableError();
@@ -211,6 +225,8 @@ export function createSearchProvider({ config, policy, logger = null, fetchImpl 
     kind,
     label: adapter.label,
     enabled: true,
+    configured: true,
+    reason: '',
     mode: 'results',
     targetFor() {
       throw new SearchUnavailableError();
@@ -296,6 +312,8 @@ export function annotateResults(results, { policy }) {
  * @property {string} kind
  * @property {string} label human-readable provider name
  * @property {boolean} enabled
+ * @property {boolean} configured every required setting is present
+ * @property {string} reason why it is not configured (empty when it is)
  * @property {'off'|'results'|'redirect'} mode
  * @property {(query: string, opts?: { page?: number, signal?: AbortSignal }) => Promise<SearchResponse>} search
  * @property {(query: string) => URL} targetFor `proxy` mode: the validated search-website URL

@@ -47,7 +47,9 @@ if (!config.admin.enabled) {
   app.log.warn('ADMIN_USERNAME / ADMIN_PASSWORD are not set: the /admin area is disabled');
 }
 if (config.allowedDomains.length === 0 && app.allowlist.size === 0) {
-  app.log.warn('The allowlist is empty: no website can be opened until domains are added');
+  app.log.warn('PROXY_ALLOWED_DOMAINS is not set and no domain was added by an administrator: the authorized scope is empty, so no website can be opened yet');
+} else if (app.allowlist.allowsAll) {
+  app.log.warn('PROXY_ALLOWED_DOMAINS contains "*": every website is authorized (the blacklist and the network safety checks still apply). Replace it with the domains you are authorized to proxy.');
 }
 
 try {

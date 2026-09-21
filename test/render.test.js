@@ -153,5 +153,11 @@ describe('render hosting', () => {
     assert.match(text, /- key: SESSION_SECRET[^\n]*\n\s*generateValue: true/);
     assert.doesNotMatch(text, /ADMIN_PASSWORD[^\n]*\n\s*value:/);
     assert.doesNotMatch(text, /maxShutdownDelaySeconds/, 'rejected by the Render free plan');
+    // automatic deployment from the connected branch, current Blueprint field
+    assert.match(text, /^\s*autoDeployTrigger: commit$/m);
+    assert.doesNotMatch(text, /^\s*autoDeploy:/m, 'deprecated in favour of autoDeployTrigger');
+    // the authorized scope is entered in the dashboard, never committed, never `*`
+    assert.match(text, /- key: PROXY_ALLOWED_DOMAINS[^\n]*\n\s*sync: false/);
+    assert.doesNotMatch(text, /PROXY_ALLOWED_DOMAINS[^\n]*\n\s*value:/, 'no committed scope, and never "*"');
   });
 });

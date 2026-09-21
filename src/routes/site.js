@@ -61,7 +61,14 @@ export default async function siteRoutes(app) {
   const searchRateLimit = { max: config.search.rateLimit, timeWindow: config.rateLimitWindowMs };
   const isAdmin = (request) => config.admin.enabled && Boolean(readAdminSession(request, sessions));
 
-  const pageModel = (request) => ({ adminLoggedIn: isAdmin(request), quickLinks: sites.featured(8), searchEnabled: search.enabled });
+  const pageModel = (request) => ({
+    adminLoggedIn: isAdmin(request),
+    quickLinks: sites.featured(8),
+    searchEnabled: search.enabled,
+    // Nothing is authorized yet: the pages say so instead of silently
+    // refusing every destination (PROXY_ALLOWED_DOMAINS is unset).
+    scopeConfigured: allowlist.size > 0
+  });
 
   function renderHome(request, reply, { error = '', value = '', status = 200 } = {}) {
     return reply
@@ -113,7 +120,7 @@ export default async function siteRoutes(app) {
   }
 
   async function renderSearch(request, reply, query, page) {
-    const model = { ...pageModel(request), query, page, provider: search.label };
+    const model = { ...pageModel(request), query, page, provider: search.label, searchReason: search.reason || '' };
     const send = (status, extra) => reply.code(status).type('text/html; charset=utf-8').send(searchPage({ ...model, ...extra }));
     if (search.mode === 'redirect') return reply.redirect(toProxyPath(search.targetFor(query)), 302);
     if (!search.enabled) return send(200, { state: 'unconfigured' });

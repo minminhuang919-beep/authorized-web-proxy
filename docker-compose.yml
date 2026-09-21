@@ -1,14 +1,17 @@
 # AnonView proxy — local Docker stack (development / self-hosting).
 #
 #   app      Node.js proxy (non-root, read-only filesystem, internal port only)
-#   searxng  private SearXNG search backend: internal network only, no
-#            published port, reachable solely as http://searxng:8080 from `app`
+#   searxng  private search backend: the OFFICIAL SearXNG container image,
+#            internal network only, no published port, reachable solely as
+#            http://searxng:8080 from `app`
 #   caddy    local TLS edge: HTTP on :80 by default; with DOMAIN set, automatic
 #            Let's Encrypt certificates and HTTP→HTTPS redirect.
 #
-# Production hosting uses Render (see render.yaml) which builds the same
-# Dockerfile and terminates TLS itself — Caddy is not used there, and SearXNG
-# runs embedded inside the app container (see Dockerfile) instead.
+# Production hosting uses Render (see render.yaml), which builds the same
+# app Dockerfile and terminates TLS itself. Render's free plan has no private
+# services, so the searxng service below is NOT part of that deployment:
+# there, SEARCH_PROVIDER stays `none` until an external backend is configured
+# (README §5 and §11).
 #
 # Configuration comes from `.env` (copy `.env.example`). Never commit `.env`.
 
@@ -31,8 +34,7 @@ services:
       DATA_DIR: /data
       # Web search through the private searxng service below (overrides .env).
       SEARCH_PROVIDER: searxng
-      SEARXNG_URL: http://searxng:8080
-      SEARXNG_EMBEDDED: "false"
+      SEARCH_PROVIDER_URL: http://searxng:8080
     depends_on:
       searxng:
         condition: service_started
@@ -60,11 +62,14 @@ services:
       - internal
 
   searxng:
-    image: docker.io/searxng/searxng:latest
+    # Official image, pinned to a dated release (never `latest` — bump this
+    # tag deliberately: https://hub.docker.com/r/searxng/searxng/tags).
+    image: docker.io/searxng/searxng:2026.9.18-c0042add3
     container_name: anonview-searxng
     restart: unless-stopped
     environment:
-      # Listen on the container's internal interface only; nothing publishes it.
+      # Listen on the container's own interface inside the private network;
+      # nothing publishes it to the host.
       SEARXNG_BIND_ADDRESS: "0.0.0.0"
       SEARXNG_PORT: "8080"
       SEARXNG_BASE_URL: http://searxng:8080/

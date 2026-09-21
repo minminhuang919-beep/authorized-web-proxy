@@ -18,21 +18,33 @@ const base = { NODE_ENV: 'test', SESSION_SECRET: 's'.repeat(40) };
 describe('search configuration', () => {
   test('search is off unless SEARCH_PROVIDER is set, and each provider validates its settings', () => {
     assert.equal(loadConfig(base).search.provider, 'none');
+    assert.equal(loadConfig(base).search.configured, true, 'nothing to configure when search is off');
     assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'bing' }), /SEARCH_PROVIDER/);
-    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng' }), /SEARXNG_URL/);
+    // A malformed value is fatal ...
+    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARCH_PROVIDER_URL: 'searx.example' }), /SEARCH_PROVIDER_URL must be an http/);
     assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARXNG_URL: 'searx.example' }), /SEARXNG_URL must be an http/);
     assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARCH_URL: 'searx.example' }), /http/);
-    // SEARXNG_URL is the documented name; SEARCH_URL stays accepted as an alias and loses when both are set.
+    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'proxy', SEARCH_PROVIDER_URL: 'https://duckduckgo.com/html/' }), /\{q\}/);
+    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARCH_URL: 'https://searx.example', SEARCH_TIMEOUT: '0' }), /SEARCH_TIMEOUT/);
+    // ... a missing one only disables search, with the variable named in `reason`.
+    for (const [env, name] of [
+      [{ SEARCH_PROVIDER: 'searxng' }, /SEARCH_PROVIDER_URL/],
+      [{ SEARCH_PROVIDER: 'proxy' }, /SEARCH_PROVIDER_URL/],
+      [{ SEARCH_PROVIDER: 'brave' }, /SEARCH_API_KEY/],
+      [{ SEARCH_PROVIDER: 'google', SEARCH_API_KEY: 'k' }, /SEARCH_ENGINE_ID/]
+    ]) {
+      const cfg = loadConfig({ ...base, ...env });
+      assert.equal(cfg.search.configured, false, JSON.stringify(env));
+      assert.match(cfg.search.reason, name);
+    }
+    // SEARCH_PROVIDER_URL is the canonical name; SEARXNG_URL (searxng only) and SEARCH_URL are aliases.
+    assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARCH_PROVIDER_URL: 'http://127.0.0.1:8888' }).search.url, 'http://127.0.0.1:8888');
     assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARXNG_URL: 'http://127.0.0.1:8888' }).search.url, 'http://127.0.0.1:8888');
     assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARXNG_URL: 'http://127.0.0.1:8888', SEARCH_URL: 'http://other:1' }).search.url, 'http://127.0.0.1:8888');
-    assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'brave', SEARCH_API_KEY: 'k', SEARXNG_URL: 'http://127.0.0.1:8888' }).search.url, '');
-    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'brave' }), /SEARCH_API_KEY/);
-    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'google', SEARCH_API_KEY: 'k' }), /SEARCH_ENGINE_ID/);
-    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'proxy', SEARCH_URL: 'https://duckduckgo.com/html/' }), /\{q\}/);
-    assert.throws(() => loadConfig({ ...base, SEARCH_PROVIDER: 'searxng', SEARCH_URL: 'https://searx.example', SEARCH_TIMEOUT: '0' }), /SEARCH_TIMEOUT/);
+    assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'brave', SEARCH_API_KEY: 'k', SEARXNG_URL: 'http://127.0.0.1:8888' }).search.url, '', 'SEARXNG_URL only applies to searxng');
     const c = loadConfig({ ...base, SEARCH_PROVIDER: 'SearXNG', SEARCH_URL: 'https://searx.example/', SEARCH_TIMEOUT: '5', SEARCH_RATE_LIMIT: '7' });
-    assert.deepEqual(c.search, { provider: 'searxng', url: 'https://searx.example/', apiKey: '', engineId: '', timeoutMs: 5000, rateLimit: 7 });
-    assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'proxy', SEARCH_URL: 'https://duckduckgo.com/html/?q={q}' }).search.provider, 'proxy');
+    assert.deepEqual(c.search, { provider: 'searxng', url: 'https://searx.example/', apiKey: '', engineId: '', configured: true, reason: '', timeoutMs: 5000, rateLimit: 7 });
+    assert.equal(loadConfig({ ...base, SEARCH_PROVIDER: 'proxy', SEARCH_PROVIDER_URL: 'https://duckduckgo.com/html/?q={q}' }).search.provider, 'proxy');
   });
 
   test('proxy mode refuses a search website outside the authorized scope at start-up', async () => {
@@ -90,12 +102,26 @@ describe('result sanitising and linking', () => {
     );
   });
 
-  test('the none provider is inert', async () => {
-    const config = loadConfig(base);
-    const provider = createSearchProvider({ config, policy: createAccessPolicy({ allowlist: new Allowlist() }) });
+  test('the none provider is inert, and so is one that is missing a setting', async () => {
+    const policy = createAccessPolicy({ allowlist: new Allowlist() });
+    const provider = createSearchProvider({ config: loadConfig(base), policy });
     assert.equal(provider.enabled, false);
     assert.equal(provider.mode, 'off');
+    assert.equal(provider.configured, true);
     await assert.rejects(provider.search('x'), { code: 'SEARCH_UNAVAILABLE' });
+
+    const warnings = [];
+    const incomplete = createSearchProvider({
+      config: loadConfig({ ...base, SEARCH_PROVIDER: 'brave' }),
+      policy,
+      logger: { warn: (details, msg) => warnings.push({ details, msg }) }
+    });
+    assert.equal(incomplete.enabled, false);
+    assert.equal(incomplete.configured, false);
+    assert.match(incomplete.reason, /SEARCH_API_KEY/);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0].msg, /not fully configured/);
+    await assert.rejects(incomplete.search('x'), { code: 'SEARCH_UNAVAILABLE' });
   });
 });
 

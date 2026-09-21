@@ -6,7 +6,7 @@ npm-debug.log*
 coverage
 data
 test
-deploy/caddy
+deploy
 docs
 *.md
 .env

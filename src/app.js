@@ -122,10 +122,12 @@ export async function buildApp({ config, deps = {} }) {
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       node: process.version,
       platform: `${process.platform}/${process.arch}`,
-      allowlist: { size: allowlist.size, persistent: Boolean(allowlist.filePath) },
+      // `configured`: an administrator has defined an authorized scope — with
+      // none, the proxy runs but opens nothing (see PROXY_ALLOWED_DOMAINS).
+      allowlist: { size: allowlist.size, persistent: Boolean(allowlist.filePath), configured: allowlist.size > 0 },
       blacklist: { size: blacklist.size, persistent: blacklist.persistent },
       sites: { size: sites.size, enabled: sites.enabledCount, persistent: sites.persistent },
-      search: { provider: search.kind, enabled: search.enabled },
+      search: { provider: search.kind, enabled: search.enabled, configured: search.configured !== false },
       sessions: sessions.stats(),
       upstream: { ...upstream.stats },
       memory: { rss: mem.rss, heapUsed: mem.heapUsed, heapTotal: mem.heapTotal }

@@ -34,8 +34,9 @@ function searchHref(query, { page = 1, mode = 'search' } = {}) {
  * @param {Array} [opts.quickLinks]
  * @param {boolean} [opts.searchEnabled]
  * @param {boolean} [opts.adminLoggedIn]
+ * @param {string} [opts.searchReason] why search is unconfigured (shown to admins only)
  */
-export function searchPage({ query, state, results = [], page = 1, hasNext = false, total = null, provider = '', related = [], message = '', quickLinks = [], searchEnabled = false, adminLoggedIn = false }) {
+export function searchPage({ query, state, results = [], page = 1, hasNext = false, total = null, provider = '', related = [], message = '', quickLinks = [], searchEnabled = false, adminLoggedIn = false, searchReason = '' }) {
   const body = html`
 <section class="results-page" aria-labelledby="results-title">
   ${searchForm({ value: query, searchEnabled, compact: true, autofocus: false })}
@@ -43,7 +44,7 @@ export function searchPage({ query, state, results = [], page = 1, hasNext = fal
   ${state === 'results' ? resultsBlock({ query, results, page, hasNext, total, provider, related }) : ''}
   ${state === 'empty' ? emptyBlock({ query, provider, page, quickLinks }) : ''}
   ${state === 'error' ? errorBlock({ query, page, message }) : ''}
-  ${state === 'unconfigured' ? unconfiguredBlock({ query, quickLinks, adminLoggedIn }) : ''}
+  ${state === 'unconfigured' ? unconfiguredBlock({ query, quickLinks, adminLoggedIn, searchReason }) : ''}
 </section>`;
   return layout({ title: state === 'unconfigured' ? 'Search' : `${query} – Search`, body, active: 'home', adminLoggedIn, bodyClass: 'page-search' });
 }
@@ -101,14 +102,18 @@ function errorBlock({ query, page, message }) {
 </div>`;
 }
 
-function unconfiguredBlock({ query, quickLinks, adminLoggedIn }) {
+function unconfiguredBlock({ query, quickLinks, adminLoggedIn, searchReason = '' }) {
   return html`
 <div class="state-card rise" role="status">
   <div class="state-icon">${icons.search}</div>
   <h2>Web search isn't set up yet</h2>
   <p class="muted">“${query}” is not a shortcut or a website address, and this proxy has no search provider configured. You can open any website inside the authorized scope by typing its address${quickLinks.length ? ', or use one of the shortcuts below' : ''}.</p>
   ${quickLinksBlock(quickLinks)}
-  ${adminLoggedIn ? html`<p class="muted small">Administrators: set <code>SEARCH_PROVIDER</code> to enable search.</p>` : ''}
+  ${
+    adminLoggedIn
+      ? html`<p class="muted small">Administrators: set <code>SEARCH_PROVIDER</code> and <code>SEARCH_PROVIDER_URL</code> to connect a search backend.${searchReason ? html` Currently: ${searchReason}` : ''}</p>`
+      : ''
+  }
 </div>`;
 }
 

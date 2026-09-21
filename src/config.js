@@ -66,6 +66,28 @@ function isHttpUrl(value) {
 }
 
 /**
+ * Which required setting is missing before `provider` can answer a search?
+ * Returns '' when the provider is ready to use.
+ * @param {string} provider
+ * @param {{ searchUrl: string, searchApiKey: string, searchEngineId: string }} settings
+ */
+function searchConfigurationGap(provider, { searchUrl, searchApiKey, searchEngineId }) {
+  if (provider === 'searxng' && !searchUrl) {
+    return 'SEARCH_PROVIDER_URL is not set (the base URL of a SearXNG instance that has `json` in its search.formats, e.g. https://searxng.example)';
+  }
+  if (provider === 'proxy' && !searchUrl) {
+    return 'SEARCH_PROVIDER_URL is not set (a URL template containing {q}, e.g. https://duckduckgo.com/html/?q={q})';
+  }
+  if ((provider === 'brave' || provider === 'google') && !searchApiKey) {
+    return `SEARCH_API_KEY is not set (required by SEARCH_PROVIDER=${provider})`;
+  }
+  if (provider === 'google' && !searchEngineId) {
+    return 'SEARCH_ENGINE_ID is not set (the Programmable Search Engine id, "cx")';
+  }
+  return '';
+}
+
+/**
  * Build the configuration object from an environment map.
  * @param {NodeJS.ProcessEnv} env
  */
@@ -144,32 +166,33 @@ export function loadConfig(env = process.env) {
   const dataDir = path.resolve(pick(env, 'DATA_DIR', './data'));
 
   // Web search for the homepage box: off unless SEARCH_PROVIDER is set.
-  // Provider-specific settings are validated here so a typo fails at start-up.
+  //
+  // A *malformed* setting (unknown provider, non-http URL, a `proxy` template
+  // without {q}) fails at start-up. A *missing* one only disables search:
+  // `config.search.configured` becomes false and `config.search.reason` names
+  // the variable, so an incomplete search configuration can never take the
+  // whole proxy down — the results page reports that search is not set up.
   const searchProvider = pick(env, 'SEARCH_PROVIDER', 'none').trim().toLowerCase();
   if (!['none', 'searxng', 'brave', 'google', 'proxy'].includes(searchProvider)) {
     throw new ConfigError('SEARCH_PROVIDER must be one of: none, searxng, brave, google, proxy');
   }
-  // SearXNG's base URL is SEARXNG_URL; SEARCH_URL is the generic name shared
-  // with the other providers and remains accepted as an alias.
-  const searxngUrl = pick(env, 'SEARXNG_URL', '').trim();
-  const searchUrl = (searchProvider === 'searxng' && searxngUrl ? searxngUrl : pick(env, 'SEARCH_URL', '')).trim();
+  // SEARCH_PROVIDER_URL is the backend's URL for every provider that takes one
+  // (SearXNG base URL, `proxy` template, brave/google endpoint override).
+  // SEARXNG_URL (searxng only) and SEARCH_URL remain accepted as aliases.
+  const providerUrl = pick(env, 'SEARCH_PROVIDER_URL', '').trim();
+  const searxngUrl = searchProvider === 'searxng' ? pick(env, 'SEARXNG_URL', '').trim() : '';
+  const legacyUrl = pick(env, 'SEARCH_URL', '').trim();
+  const searchUrl = providerUrl || searxngUrl || legacyUrl;
+  const searchUrlName = providerUrl ? 'SEARCH_PROVIDER_URL' : searxngUrl ? 'SEARXNG_URL' : legacyUrl ? 'SEARCH_URL' : 'SEARCH_PROVIDER_URL';
   const searchApiKey = pick(env, 'SEARCH_API_KEY', '').trim();
   const searchEngineId = pick(env, 'SEARCH_ENGINE_ID', '').trim();
   if (searchUrl && !isHttpUrl(searchUrl.replaceAll('{q}', 'q'))) {
-    throw new ConfigError(`${searchProvider === 'searxng' ? 'SEARXNG_URL' : 'SEARCH_URL'} must be an http:// or https:// URL`);
+    throw new ConfigError(`${searchUrlName} must be an http:// or https:// URL`);
   }
-  if (searchProvider === 'searxng' && !searchUrl) {
-    throw new ConfigError('SEARXNG_URL (the base URL of the SearXNG instance, e.g. http://127.0.0.1:8888) is required when SEARCH_PROVIDER=searxng');
+  if (searchProvider === 'proxy' && searchUrl && !searchUrl.includes('{q}')) {
+    throw new ConfigError('SEARCH_PROVIDER_URL must be a URL template containing {q} when SEARCH_PROVIDER=proxy, e.g. https://duckduckgo.com/html/?q={q}');
   }
-  if ((searchProvider === 'brave' || searchProvider === 'google') && !searchApiKey) {
-    throw new ConfigError(`SEARCH_API_KEY is required when SEARCH_PROVIDER=${searchProvider}`);
-  }
-  if (searchProvider === 'google' && !searchEngineId) {
-    throw new ConfigError('SEARCH_ENGINE_ID (the Programmable Search Engine id, "cx") is required when SEARCH_PROVIDER=google');
-  }
-  if (searchProvider === 'proxy' && (!searchUrl || !searchUrl.includes('{q}'))) {
-    throw new ConfigError('SEARCH_URL must be a URL template containing {q} when SEARCH_PROVIDER=proxy, e.g. https://duckduckgo.com/html/?q={q}');
-  }
+  const searchGap = searchConfigurationGap(searchProvider, { searchUrl, searchApiKey, searchEngineId });
 
   return Object.freeze({
     nodeEnv,
@@ -194,6 +217,11 @@ export function loadConfig(env = process.env) {
       url: searchUrl,
       apiKey: searchApiKey,
       engineId: searchEngineId,
+      // `configured`: the selected provider has everything it needs (always
+      // true for `none`, where search is deliberately off). `reason` names the
+      // missing variable when it does not.
+      configured: searchProvider === 'none' ? true : !searchGap,
+      reason: searchGap,
       timeoutMs: parseInteger(pick(env, 'SEARCH_TIMEOUT', '10'), 'SEARCH_TIMEOUT', { min: 1, max: 60 }) * 1000,
       rateLimit: parseInteger(pick(env, 'SEARCH_RATE_LIMIT', '60'), 'SEARCH_RATE_LIMIT', { min: 1, max: 100_000 })
     }),

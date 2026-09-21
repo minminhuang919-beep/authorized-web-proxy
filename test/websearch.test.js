@@ -259,45 +259,140 @@ describe('GET /search end to end (SearXNG stand-in)', () => {
   });
 });
 
-describe('deployment keeps SearXNG private', () => {
-  test('render.yaml: embedded SearXNG on loopback, generated secret, no second service, no maxShutdownDelaySeconds', async () => {
+describe('deployment: the search backend is external, never built from source', () => {
+  test('Dockerfile builds the application only: no SearXNG source build, no pip/venv, non-root, /health', async () => {
+    const docker = await fs.readFile(path.join(ROOT, 'Dockerfile'), 'utf8');
+    // The fragile source build that broke the Render deploy must stay gone.
+    assert.doesNotMatch(docker, /SEARXNG_COMMIT|AS searxng/i, 'no SearXNG build stage');
+    assert.doesNotMatch(docker, /\bpip\b|venv|--only-binary|granian/i, 'no Python build inside our image');
+    assert.doesNotMatch(docker, /curl[^\n]*\.tar\.gz|wget[^\n]*\.tar\.gz/i, 'no source archive download');
+    assert.doesNotMatch(docker, /apk add/, 'nothing installed on top of the node base image');
+    assert.doesNotMatch(docker, /ENTRYPOINT/, 'node is PID 1: no supervisor script');
+    assert.match(docker, /^RUN npm ci --omit=dev/m);
+    assert.match(docker, /^USER 1000:1000$/m);
+    assert.match(docker, /\/health/);
+    assert.match(docker, /^CMD \["node", "src\/server\.js"\]$/m);
+  });
+
+  test('every Dockerfile COPY source exists and is not excluded by .dockerignore', async () => {
+    const docker = await fs.readFile(path.join(ROOT, 'Dockerfile'), 'utf8');
+    const ignored = (await fs.readFile(path.join(ROOT, '.dockerignore'), 'utf8'))
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'));
+    const sources = [...docker.matchAll(/^COPY ((?:--[^\s]+ )*)(.+)$/gm)]
+      .filter((m) => !/--from=/.test(m[1]))
+      .flatMap((m) => m[2].trim().split(/\s+/).slice(0, -1));
+    assert.deepEqual(sources, ['package.json', 'package-lock.json', 'package.json', 'src']);
+    for (const src of sources) {
+      await fs.access(path.join(ROOT, src)); // the build would fail on a missing source
+      assert.ok(!ignored.includes(src), `${src} must not be in .dockerignore`);
+    }
+  });
+
+  test('render.yaml: one free web service, no private service, search left to configuration', async () => {
     const text = await fs.readFile(path.join(ROOT, 'render.yaml'), 'utf8');
     assert.equal((text.match(/^\s*-\s*type: web$/gm) || []).length, 1, 'a single web service');
-    assert.doesNotMatch(text, /type: pserv/);
-    assert.match(text, /- key: SEARCH_PROVIDER\s*\n\s*value: searxng/);
-    assert.match(text, /- key: SEARXNG_URL\s*\n\s*value: http:\/\/127\.0\.0\.1:8888/);
-    assert.match(text, /- key: SEARXNG_SECRET[^\n]*\n\s*generateValue: true/);
-    assert.doesNotMatch(text, /SEARXNG_SECRET[^\n]*\n\s*value:/);
+    assert.doesNotMatch(text, /type: pserv/, 'private services are not on the free plan');
+    assert.match(text, /^\s*plan: free$/m);
+    assert.match(text, /- key: SEARCH_PROVIDER\s*\n\s*value: none/, 'search off until a backend is configured');
+    assert.match(text, /SEARCH_PROVIDER_URL/, 'documents how to point at an external backend');
+    assert.doesNotMatch(text, /SEARXNG_EMBEDDED|SEARXNG_PORT|SEARXNG_SECRET/, 'nothing embedded any more');
     assert.doesNotMatch(text, /maxShutdownDelaySeconds/);
   });
 
-  test('Dockerfile and entrypoint: SearXNG bound to 127.0.0.1 only, non-root, /health kept', async () => {
-    const docker = await fs.readFile(path.join(ROOT, 'Dockerfile'), 'utf8');
-    assert.match(docker, /^ARG SEARXNG_COMMIT=[0-9a-f]{40}$/m, 'pinned SearXNG commit');
-    assert.match(docker, /searxng\/searxng\/archive\/\$\{SEARXNG_COMMIT\}\.tar\.gz/);
-    assert.match(docker, /--only-binary=:all:/);
-    assert.match(docker, /^USER 1000:1000$/m);
-    assert.match(docker, /\/health/);
-    assert.match(docker, /ENTRYPOINT \["\/usr\/local\/bin\/docker-entrypoint\.sh"\]/);
-    const entry = await fs.readFile(path.join(ROOT, 'deploy/docker-entrypoint.sh'), 'utf8');
-    assert.match(entry, /--host 127\.0\.0\.1/);
-    assert.match(entry, /SEARXNG_BIND_ADDRESS=127\.0\.0\.1/);
-    assert.match(entry, /node \/app\/src\/server\.js/);
-    const settings = await fs.readFile(path.join(ROOT, 'deploy/searxng/settings.yml'), 'utf8');
-    assert.match(settings, /bind_address: "127\.0\.0\.1"/);
-    assert.match(settings, /^\s*- json\b/m, 'JSON API enabled for the provider');
-    assert.match(settings, /public_instance: false/);
-    assert.match(settings, /secret_key: "change-me-via-SEARXNG_SECRET"/);
-  });
-
-  test('docker-compose: searxng is an internal service with no published ports', async () => {
+  test('docker-compose: the official SearXNG image, pinned, internal network, no published port', async () => {
     const compose = await fs.readFile(path.join(ROOT, 'docker-compose.yml'), 'utf8');
     const block = compose.slice(compose.indexOf('\n  searxng:'), compose.indexOf('\n  caddy:'));
-    assert.match(block, /image: docker\.io\/searxng\/searxng/);
-    assert.doesNotMatch(block, /^\s*ports:/m, 'never published on the host');
+    const image = /image: (docker\.io\/searxng\/searxng:\S+)/.exec(block);
+    assert.ok(image, 'the official SearXNG image');
+    assert.doesNotMatch(image[1], /:latest$/, 'pinned to a dated release, not latest');
+    assert.doesNotMatch(block, /^\s*(ports|build):/m, 'never published, never built from source');
     assert.match(block, /networks:\s*\n\s*- internal/);
-    assert.match(compose, /SEARXNG_URL: http:\/\/searxng:8080/);
-    assert.match(compose, /SEARXNG_EMBEDDED: "false"/);
+    assert.match(compose, /SEARCH_PROVIDER_URL: http:\/\/searxng:8080/);
+    assert.doesNotMatch(compose, /SEARXNG_EMBEDDED/);
+    const settings = await fs.readFile(path.join(ROOT, 'deploy/searxng/settings.yml'), 'utf8');
+    assert.match(settings, /^\s*- json\b/m, 'JSON API enabled for the provider');
+    assert.match(settings, /public_instance: false/);
+    assert.match(settings, /limiter: false/);
+    assert.match(settings, /secret_key: "change-me-via-SEARXNG_SECRET"/);
+  });
+});
+
+describe('search is optional: an unconfigured backend never breaks the proxy', () => {
+  test('SEARCH_PROVIDER without its URL disables search instead of failing start-up', async () => {
+    const config = loadConfig({ NODE_ENV: 'test', SESSION_SECRET: 's'.repeat(40), SEARCH_PROVIDER: 'searxng' });
+    assert.equal(config.search.configured, false);
+    assert.match(config.search.reason, /SEARCH_PROVIDER_URL/);
+
+    const ctx = await createTestApp({ env: { SEARCH_PROVIDER: 'searxng', PROXY_SITES: SITES } });
+    try {
+      const res = await ctx.app.inject({ method: 'GET', url: '/search?q=geoguessr' });
+      assert.equal(res.statusCode, 200);
+      assert.match(res.body, /Web search isn't set up yet/);
+      assert.doesNotMatch(res.body, /SEARCH_PROVIDER_URL/, 'the reason is for administrators, not visitors');
+
+      const health = JSON.parse((await ctx.app.inject({ method: 'GET', url: '/health' })).body);
+      assert.equal(health.status, 'ok', 'the service stays healthy');
+      assert.deepEqual(health.search, { provider: 'searxng', enabled: false, configured: false });
+
+      // shortcuts and addresses are unaffected
+      const shortcut = await ctx.app.inject({ method: 'GET', url: '/search?q=youtube' });
+      assert.equal(shortcut.statusCode, 302);
+      assert.equal(shortcut.headers.location, '/p/http/site.test/landing');
+      const address = await ctx.app.inject({ method: 'GET', url: '/search?q=site.test' });
+      assert.equal(address.statusCode, 302);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('SEARCH_PROVIDER_URL is the canonical setting; SEARXNG_URL and SEARCH_URL stay aliases', async () => {
+    const api = await createMockSearch().start();
+    try {
+      const base = { NODE_ENV: 'test', SESSION_SECRET: 's'.repeat(40), SEARCH_PROVIDER: 'searxng' };
+      assert.equal(loadConfig({ ...base, SEARCH_PROVIDER_URL: api.url }).search.url, api.url);
+      assert.equal(loadConfig({ ...base, SEARXNG_URL: api.url }).search.url, api.url);
+      assert.equal(loadConfig({ ...base, SEARCH_URL: api.url }).search.url, api.url);
+      assert.equal(loadConfig({ ...base, SEARCH_PROVIDER_URL: api.url, SEARXNG_URL: 'http://other.invalid:1', SEARCH_URL: 'http://other.invalid:2' }).search.url, api.url, 'canonical name wins');
+
+      const ctx = await createTestApp({ env: { SEARCH_PROVIDER: 'searxng', SEARCH_PROVIDER_URL: api.url, SEARCH_TIMEOUT: '1' } });
+      try {
+        const res = await ctx.app.inject({ method: 'GET', url: '/search?q=geoguessr' });
+        assert.equal(res.statusCode, 200);
+        assert.match(res.body, /class="results"/);
+        assert.equal(api.last().query.q, 'geoguessr');
+      } finally {
+        await ctx.close();
+      }
+    } finally {
+      await api.stop();
+    }
+  });
+
+  test('an empty authorized scope is reported instead of silently refusing everything', async () => {
+    const ctx = await createTestApp({ env: { PROXY_ALLOWED_DOMAINS: '' } });
+    try {
+      const home = await ctx.app.inject({ method: 'GET', url: '/' });
+      assert.equal(home.statusCode, 200);
+      assert.match(home.body, /No websites are authorized on this proxy yet/);
+      assert.doesNotMatch(home.body, /PROXY_ALLOWED_DOMAINS/, 'the variable name is only shown to administrators');
+      const health = JSON.parse((await ctx.app.inject({ method: 'GET', url: '/health' })).body);
+      assert.equal(health.status, 'ok');
+      assert.equal(health.allowlist.configured, false);
+      const refused = await ctx.app.inject({ method: 'GET', url: '/search?q=site.test' });
+      assert.equal(refused.statusCode, 403, 'nothing is authorized while the scope is empty');
+      assert.match(refused.body, /Website not authorized/);
+    } finally {
+      await ctx.close();
+    }
+    const configured = await createTestApp({});
+    try {
+      const home = await configured.app.inject({ method: 'GET', url: '/' });
+      assert.doesNotMatch(home.body, /No websites are authorized/, 'not shown once a scope exists');
+    } finally {
+      await configured.close();
+    }
   });
 });
 

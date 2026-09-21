@@ -368,6 +368,10 @@ a.chip:hover { border-color: var(--accent); background: var(--accent-soft); text
 .flash { border-radius: var(--radius-sm); padding: 0.8rem 1rem; margin-bottom: 1rem; font-weight: 500; border: 1px solid transparent; }
 .flash-ok { background: var(--ok-soft); color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
 .flash-error { background: var(--danger-soft); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
+.flash-warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+.flash-warn a, .flash-warn code { color: inherit; }
+.scope-notice { max-width: 52ch; margin: 1.5rem auto 0; display: flex; align-items: flex-start; gap: 0.6rem; text-align: left; }
+.scope-notice svg { width: 1.1rem; height: 1.1rem; flex: none; margin-top: 0.15rem; }
 
 /* --------------------------------------------------------------------------
    Admin

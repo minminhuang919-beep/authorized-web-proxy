@@ -2,22 +2,25 @@
 #
 # Deploy: Render Dashboard → New → Blueprint → select this repository. Render
 # reads this file, creates the web service on the free plan, builds the
-# Dockerfile and prompts for the secret values marked `sync: false`.
+# Dockerfile and prompts for the values marked `sync: false`.
 #
-# Nothing secret is stored in this file.
+# Nothing secret is stored in this file, and no destination is authorized by
+# default: PROXY_ALLOWED_DOMAINS must be filled in with the domains you are
+# authorized to proxy before any website can be opened.
 
 services:
   - type: web
     name: anonview-proxy
     runtime: docker
+    # Free instance type: 512 MB RAM, 0.1 CPU, spins down after 15 idle minutes.
     plan: free
     # region: frankfurt        # optional: oregon (default) | ohio | virginia | frankfurt | singapore
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    # The embedded SearXNG adds ~150 MB RSS; NODE_OPTIONS in the Dockerfile
-    # caps Node's heap so both fit in the free plan's 512 MB.
-    autoDeploy: true
+    # Deploy every push to the connected branch (replaces the deprecated
+    # `autoDeploy: true`): https://render.com/docs/blueprint-spec#autodeploytrigger
+    autoDeployTrigger: commit
     envVars:
       # ---- runtime (do not change) ------------------------------------------------
       - key: NODE_ENV
@@ -41,10 +44,13 @@ services:
         value: info
 
       # ---- required: entered in the Render dashboard (never committed) ------------
-      # `*` authorizes every website (blacklist + SSRF checks still apply).
-      # Replace with a list such as example.com,*.example.com to restrict it.
+      # The authorized scope: a comma-separated list of the domains you are
+      # authorized to proxy, e.g. example.com,*.example.com,docs.example.org
+      # (`*.` covers subdomains only, so list the bare domain too). Until it is
+      # set, the proxy opens nothing and says so on its homepage. Do NOT enter
+      # `*`: that authorizes every website and turns this into an open proxy.
       - key: PROXY_ALLOWED_DOMAINS
-        value: "*"
+        sync: false
       - key: ADMIN_USERNAME
         sync: false
       - key: ADMIN_PASSWORD           # at least 12 characters (or set ADMIN_PASSWORD_HASH instead, see README)
@@ -81,29 +87,31 @@ services:
         value: "true"
 
       # ---- search box: shortcuts and web search -----------------------------------
-      # Web search runs on a private SearXNG instance embedded in this same
-      # container (Dockerfile + deploy/docker-entrypoint.sh): it binds to
-      # 127.0.0.1 only, so it is never reachable from the internet and needs no
-      # second Render service (the free plan has no private services). No API
-      # key or card is required. Set SEARCH_PROVIDER=none to switch search off,
-      # or brave/google/proxy with the extra variables described in README §5.
+      # Shortcuts and website addresses always work. Free-text web search needs
+      # a search backend, which this service does NOT host: Render's free plan
+      # is a single 512 MB / 0.1 CPU web service with no private services, and
+      # running a metasearch engine (SearXNG) beside the proxy in that container
+      # is not reliable — see README §11. Until a backend is configured the
+      # results page says "Web search isn't set up yet"; everything else works.
+      #
+      # To enable search, add these in the Environment tab (README §5):
+      #   SEARCH_PROVIDER=searxng  SEARCH_PROVIDER_URL=https://<your-searxng>/
+      #     a SearXNG instance you host (any plan with private services, another
+      #     provider, or your own machine) with `json` in its search.formats
+      #   SEARCH_PROVIDER=brave    SEARCH_API_KEY=<key>
+      #   SEARCH_PROVIDER=google   SEARCH_API_KEY=<key>  SEARCH_ENGINE_ID=<cx>
+      #   SEARCH_PROVIDER=proxy    SEARCH_PROVIDER_URL=https://<search site>/?q={q}
+      #     no API: the query is opened on that search website through the proxy;
+      #     its host must be inside PROXY_ALLOWED_DOMAINS.
       - key: SEARCH_PROVIDER
-        value: searxng
-      - key: SEARXNG_URL
-        value: http://127.0.0.1:8888
-      - key: SEARXNG_EMBEDDED
-        value: "true"
-      - key: SEARXNG_PORT
-        value: "8888"
-      - key: SEARXNG_SECRET           # SearXNG's own secret key, generated once by Render
-        generateValue: true
+        value: none
       - key: SEARCH_TIMEOUT
         value: "10"
       - key: SEARCH_RATE_LIMIT
         value: "60"
       # Optional: permanent site shortcuts (the admin "Sites" page can export
       # this value), format shortcut=destination|Name|Description, e.g.
-      #   google=https://google.com|Google|Google Search,youtube=https://youtube.com|YouTube
+      #   docs=https://docs.example.com|Docs|Documentation
       # Add it in the Environment tab, or uncomment to be prompted for it:
       # - key: PROXY_SITES
       #   sync: false

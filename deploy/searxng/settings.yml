@@ -1,11 +1,15 @@
 # SearXNG settings for the AnonView proxy's private search backend.
 #
-# This instance is never reached by browsers: it listens on the loopback
-# interface (Render, embedded in the app container) or on the internal Docker
-# network (docker-compose), and only the proxy's search provider talks to it.
+# Mounted read-only into the OFFICIAL SearXNG container that docker-compose
+# runs next to the app (`searxng` service). The proxy application itself never
+# contains or starts SearXNG: it only calls this instance's JSON API over the
+# private Docker network, and the container publishes no port to the host.
 # The proxy sends the query alone — no cookies, headers or credentials of the
 # visitor — and reduces the JSON answer to plain-text titles, snippets and
 # http(s) links before it renders its own results page.
+#
+# The same file works for a SearXNG instance hosted anywhere else; point
+# SEARCH_PROVIDER_URL at it (README §5).
 #
 # Only the keys below differ from SearXNG's defaults
 # (https://docs.searxng.org/admin/settings/). Environment overrides used at
@@ -28,8 +32,10 @@ search:
     - json                # the proxy uses the JSON API
 
 server:
-  port: 8888
-  bind_address: "127.0.0.1"
+  port: 8080
+  # Inside its own container, on a Docker network that is not published; the
+  # only client is the proxy (docker-compose also sets SEARXNG_BIND_ADDRESS).
+  bind_address: "0.0.0.0"
   secret_key: "change-me-via-SEARXNG_SECRET"   # overridden by SEARXNG_SECRET
   limiter: false          # single trusted client (the proxy) — its own rate limit applies
   public_instance: false
