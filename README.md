@@ -673,6 +673,10 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 
 * **Restart**: service → **Manual Deploy** → **Restart service** (keeps the
   current image; takes ~30 s).
+* **Which build is live?** `GET /health` returns `commit` (the short
+  `RENDER_GIT_COMMIT` Render injects into the deploy) next to `version`. If it
+  is not the commit you pushed, the deploy did not reach production — see the
+  *Deploy cancelled* row in §12.
 * **Redeploy the same commit**: **Manual Deploy** → **Deploy latest commit**
   (rebuilds; use **Clear build cache & deploy** if the build looks stale).
 * **Deploy new code**: `git push` to `main` — Render builds, health-checks
@@ -730,6 +734,8 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 | Symptom | What to check |
 |---|---|
 | Build fails on Render | Events → deploy logs. The build only needs `package.json`, `package-lock.json` and `src/` to be committed, and network access for `npm ci` (about 1–2 min). |
+| Events show `Deploy cancelled` (and the logs show `signal: SIGTERM, shutting down`) | Two deploys were triggered close together and Render cancelled the older one — typically a code push *and* a Blueprint env-var sync from the same `git push`, or someone pressing **Cancel**. Nothing crashed: `signal: SIGTERM, shutting down` is this app's own graceful-shutdown line, logged whenever Render replaces or spins down the instance. The service keeps serving the **previous** image, so check `/health` → `commit`; if it is not your commit, run **Manual Deploy → Deploy latest commit** once no other deploy is in progress. |
+| The site is up but behaves like the old code | An env-var change restarts the service from the *last successful build*, so a cancelled or failed build leaves the previous image running. Compare `/health` → `commit` with `git rev-parse --short HEAD`, then redeploy. |
 | Deploy stuck on "health check" | Logs tab. Common cause: a configuration error printed at start-up (`SESSION_SECRET` missing, `ADMIN_PASSWORD` shorter than 12 chars or containing a common word, invalid `PROXY_ALLOWED_DOMAINS` entry such as an IP or a port). Fix the variable → Render redeploys. |
 | `/admin` returns 404 | `ADMIN_USERNAME` and `ADMIN_PASSWORD` (or `ADMIN_PASSWORD_HASH`) must be set. |
 | A blacklisted site still opens | Check the scope/blacklist order: only hosts inside the scope reach the blacklist; entries cover subdomains, so `example.com` also blocks `www.example.com`. |

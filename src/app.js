@@ -119,6 +119,10 @@ export async function buildApp({ config, deps = {} }) {
     return {
       status: 'ok',
       version: pkg.version,
+      // Which build is actually live: Render injects RENDER_GIT_COMMIT into
+      // every deploy, so `/health` answers "did my push reach production?"
+      // without reading the dashboard. Null anywhere else.
+      commit: (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || null,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       node: process.version,
       platform: `${process.platform}/${process.arch}`,

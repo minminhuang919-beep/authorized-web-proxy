@@ -138,6 +138,23 @@ describe('render hosting', () => {
     }
   });
 
+  test('/health names the deployed commit so a live instance can be identified', async () => {
+    const previous = process.env.RENDER_GIT_COMMIT;
+    const ctx = await createTestApp({ withMock: false });
+    try {
+      delete process.env.RENDER_GIT_COMMIT;
+      assert.equal(ctx.app.healthSnapshot().commit, null, 'null off Render');
+      process.env.RENDER_GIT_COMMIT = '22d7c12abcdef0123456789';
+      assert.equal(ctx.app.healthSnapshot().commit, '22d7c12', 'the short hash Render injected');
+      const res = await ctx.app.inject({ method: 'GET', url: '/health' });
+      assert.equal(JSON.parse(res.body).commit, '22d7c12');
+    } finally {
+      if (previous === undefined) delete process.env.RENDER_GIT_COMMIT;
+      else process.env.RENDER_GIT_COMMIT = previous;
+      await ctx.close();
+    }
+  });
+
   test('render.yaml describes a free Docker web service with the required variables', async () => {
     const text = await fs.readFile(path.join(ROOT, 'render.yaml'), 'utf8');
     assert.match(text, /^\s*-\s*type: web$/m);
