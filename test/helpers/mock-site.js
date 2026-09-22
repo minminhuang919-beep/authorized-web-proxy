@@ -163,6 +163,31 @@ export function createMockSite() {
       case p === '/redirect/mailto':
         res.writeHead(302, { location: 'mailto:a@b.test' });
         return res.end();
+      // An ordinary username/password form: nothing to do with OAuth, so the
+      // proxy must keep serving it (and relay the POST untouched).
+      case p === '/login':
+        if (req.method === 'POST') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify({ received: record.body.toString('utf8') }));
+        }
+        return html(res, '<html><body><h1>Sign in</h1><form method="post" action="/login"><input name="username"><input type="password" name="password"><button>Go</button></form></body></html>');
+      case p === '/accounts':
+        return html(res, '<html><body><h1>Your accounts</h1><a href="/landing">back</a></body></html>');
+      // Ordinary page whose query happens to use the words code and state.
+      case p === '/shipping':
+        return html(res, '<html><body>shipping</body></html>');
+      // The classic "sign in with Google" hop.
+      case p === '/redirect/signin':
+        res.writeHead(302, {
+          location:
+            'https://accounts.google.com/o/oauth2/v2/auth?client_id=123456789-abc.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fsite.test%2Fcallback&response_type=code&scope=openid%20email&state=Ky7dQ2bX9fLmT4pR'
+        });
+        return res.end();
+      // Reached only if the proxy failed to stop an authentication flow.
+      case p === '/oauth/authorize':
+      case p === '/oauth/token':
+      case p === '/callback':
+        return html(res, '<html><body>UPSTREAM AUTH ENDPOINT REACHED</body></html>');
       case p === '/landing':
         return html(res, '<html><body>landed</body></html>');
       case p === '/set-cookie':

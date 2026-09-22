@@ -16,6 +16,7 @@ import { ProxyError, TooManyRequestsError } from './errors.js';
 import { createAccessPolicy } from './policy.js';
 import { loggerOptions, safePath } from './logger.js';
 import { createUrlRewriter } from './rewrite/url.js';
+import { createAuthFlowExemptions } from './security/auth-flow.js';
 import { createSearchProvider } from './search/index.js';
 import { SessionStore } from './sessions.js';
 import { SiteDirectory } from './sites.js';
@@ -89,6 +90,13 @@ export async function buildApp({ config, deps = {} }) {
 
   const search = createSearchProvider({ config, policy, logger: app.log, fetchImpl: deps.fetch });
 
+  // Sign-in flows are refused for every host except those the operator has
+  // declared they run themselves (PROXY_AUTH_FLOW_HOSTS).
+  const authFlowExemptions = createAuthFlowExemptions(config.authFlowHosts);
+  if (authFlowExemptions.size > 0) {
+    app.log.info({ hosts: config.authFlowHosts }, 'authentication flows are proxied for these operator-owned hosts');
+  }
+
   const sessions = new SessionStore({ ttlMs: config.sessionTtlMs, max: config.sessionMax });
   sessions.start();
 
@@ -109,6 +117,7 @@ export async function buildApp({ config, deps = {} }) {
   app.decorate('policy', policy);
   app.decorate('sites', sites);
   app.decorate('search', search);
+  app.decorate('authFlowExemptions', authFlowExemptions);
   app.decorate('audit', audit);
   app.decorate('sessions', sessions);
   app.decorate('upstream', upstream);
@@ -224,7 +233,9 @@ function errorHandler(err, request, reply) {
 
   if (err instanceof ProxyError) {
     ({ status, code, message, extra } = err);
-    if (status >= 500) request.log.warn({ code, reason: err.message, path: safePath(request.url) }, 'upstream failure');
+    // A refused sign-in flow is a deliberate answer, not an upstream problem
+    // (the proxy route already logged it with the host and the category).
+    if (status >= 500 && code !== 'AUTH_FLOW_UNSUPPORTED') request.log.warn({ code, reason: err.message, path: safePath(request.url) }, 'upstream failure');
   } else if (err.code === 'FST_ERR_CTP_BODY_TOO_LARGE' || err.statusCode === 413) {
     status = 413;
     code = 'REQUEST_TOO_LARGE';

@@ -227,6 +227,11 @@ export function loadConfig(env = process.env) {
     }),
 
     allowedDomains: parseList(pick(env, 'PROXY_ALLOWED_DOMAINS', '')),
+    // Hosts whose sign-in / OAuth flows may be proxied because the operator
+    // runs the application and its OAuth client (README §6). Empty by
+    // default: every third-party authentication flow gets the explanation
+    // page instead of a provider error.
+    authFlowHosts: parseList(pick(env, 'PROXY_AUTH_FLOW_HOSTS', '')),
     unlistedUrlMode,
     showAllowlist: parseBool(pick(env, 'PROXY_SHOW_ALLOWLIST', 'true'), 'PROXY_SHOW_ALLOWLIST'),
     banner: parseBool(pick(env, 'PROXY_BANNER', 'true'), 'PROXY_BANNER'),

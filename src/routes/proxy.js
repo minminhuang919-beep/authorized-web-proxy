@@ -7,7 +7,8 @@
  * headers → stream the body back, decoding and rewriting HTML/CSS on the fly.
  */
 import { pipeline } from 'node:stream';
-import { DomainBlockedError, DomainNotAllowedError, InvalidUrlError, ProxyError, RequestTooLargeError } from '../errors.js';
+import { AuthFlowUnsupportedError, DomainBlockedError, DomainNotAllowedError, InvalidUrlError, ProxyError, RequestTooLargeError } from '../errors.js';
+import { detectAuthFlow, redactUrlForDisplay } from '../security/auth-flow.js';
 import { splitProxyPath, targetFromProxyPath, toProxyPath, validateTarget } from '../security/target.js';
 import { ACCEPT_ENCODING, canDecode, clientAccepts, createDecoder, normalizeEncoding } from '../upstream/decompress.js';
 import { buildUpstreamRequestHeaders, filterUpstreamResponseHeaders } from '../upstream/headers.js';
@@ -24,7 +25,7 @@ const BODYLESS_STATUS = new Set([204, 205, 304]);
 const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 export default async function proxyRoutes(app) {
-  const { config, allowlist, policy, sessions, upstream, urlRewriter } = app;
+  const { config, allowlist, policy, sessions, upstream, urlRewriter, authFlowExemptions } = app;
   const via = `1.1 anonview/${app.appVersion}`;
 
   // Bodies are streamed through untouched, whatever their content type.
@@ -82,6 +83,18 @@ export default async function proxyRoutes(app) {
 
       const { target } = targetFromProxyPath(rawUrl, policy, { maxLength: config.maxUrlLength });
       const method = request.method;
+
+      // Third-party sign-in flows are refused *before* anything is sent
+      // upstream: the identity provider validates the application's own
+      // origin, which a proxy cannot satisfy without forging it. The request
+      // never leaves the proxy, so no authorization code, token, password or
+      // authentication cookie is relayed, read or stored - and only the host
+      // and the category are logged, never the query string.
+      const authFlow = detectAuthFlow(target);
+      if (authFlow && !authFlowExemptions.isExempt(target.hostname)) {
+        request.log.info({ host: target.hostname, kind: authFlow.kind }, 'sign-in flow not supported through the proxy');
+        throw new AuthFlowUnsupportedError(target.hostname, { ...authFlow, origin: target.origin });
+      }
 
       let session = readSession(request, sessions);
       let cookieHeader = null;
@@ -154,6 +167,15 @@ export default async function proxyRoutes(app) {
       if (REDIRECT_CODES.has(res.statusCode) && typeof uh.location === 'string') {
         const resolved = parseUrl(uh.location, target);
         if (resolved && (resolved.protocol === 'http:' || resolved.protocol === 'https:')) {
+          // The usual "sign in with …" hop: an ordinary page redirecting into
+          // an authorization endpoint. Stop here rather than sending the
+          // browser on to a flow that the provider will reject anyway.
+          const redirectFlow = detectAuthFlow(resolved);
+          if (redirectFlow && !authFlowExemptions.isExempt(resolved.hostname)) {
+            res.body.destroy();
+            request.log.info({ host: resolved.hostname, kind: redirectFlow.kind }, 'sign-in redirect not supported through the proxy');
+            throw new AuthFlowUnsupportedError(resolved.hostname, { ...redirectFlow, origin: resolved.origin });
+          }
           try {
             const validated = validateTarget(resolved, policy);
             location = toProxyPath(validated) + resolved.hash;
@@ -163,8 +185,11 @@ export default async function proxyRoutes(app) {
             // explained to the user.
             res.body.destroy();
             if (!(err instanceof ProxyError)) throw err;
-            if (err.code === 'DOMAIN_BLACKLISTED') throw new DomainBlockedError(resolved.hostname, { redirectTarget: resolved.href });
-            throw new DomainNotAllowedError(resolved.hostname, { redirectTarget: resolved.href });
+            // The destination is named with its query values redacted: a
+            // stopped redirect may well be an OAuth callback carrying a code.
+            const shown = redactUrlForDisplay(resolved);
+            if (err.code === 'DOMAIN_BLACKLISTED') throw new DomainBlockedError(resolved.hostname, { redirectTarget: shown });
+            throw new DomainNotAllowedError(resolved.hostname, { redirectTarget: shown });
           }
         } else if (resolved) {
           location = resolved.href; // mailto:, etc. — passes through untouched

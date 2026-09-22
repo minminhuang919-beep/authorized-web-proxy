@@ -61,8 +61,9 @@ export function fakeLookup(hosts) {
  * @param {string[]} [opts.allowedAddresses] addresses permitted on top of the production policy
  * @param {boolean} [opts.withMock] start a mock site (default true)
  * @param {(app: import('fastify').FastifyInstance) => Promise<void>|void} [opts.setup] runs before the app is readied (extra routes)
+ * @param {object} [opts.deps] extra buildApp dependencies (e.g. a capturing `logger`)
  */
-export async function createTestApp({ env = {}, hosts = DEFAULT_HOSTS, allowedAddresses = ['127.0.0.1'], withMock = true, setup } = {}) {
+export async function createTestApp({ env = {}, hosts = DEFAULT_HOSTS, allowedAddresses = ['127.0.0.1'], withMock = true, setup, deps: extraDeps = {} } = {}) {
   const mock = withMock ? await createMockSite().start() : null;
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'anonview-test-'));
   const config = loadConfig({
@@ -81,7 +82,8 @@ export async function createTestApp({ env = {}, hosts = DEFAULT_HOSTS, allowedAd
     deps: {
       lookup: fakeLookup(hosts),
       isAddressAllowed: (address) => allowedAddresses.includes(address) || productionIsAddressAllowed(address),
-      defaultPorts: mock ? { http: mock.port, https: mock.port } : undefined
+      defaultPorts: mock ? { http: mock.port, https: mock.port } : undefined,
+      ...extraDeps
     }
   });
   if (setup) await setup(app);

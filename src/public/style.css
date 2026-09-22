@@ -300,6 +300,9 @@ body.is-busy .progress { opacity: 1; }
 .state-card .quick-links { justify-content: center; margin: 1.25rem auto 0; }
 .state-icon { display: inline-grid; place-items: center; width: 3.5rem; height: 3.5rem; border-radius: 50%; background: var(--accent-soft); color: var(--accent); margin-bottom: 0.75rem; }
 .state-icon.is-warn { background: var(--warn-soft); color: var(--warn); }
+.auth-steps { list-style: none; margin: 1.5rem auto 0; padding: 0; max-width: 46ch; display: grid; gap: 0.75rem; text-align: left; }
+.auth-steps li { display: flex; gap: 0.6rem; align-items: flex-start; color: var(--text-soft); font-size: 0.925rem; line-height: 1.5; }
+.auth-steps svg { width: 1.05rem; height: 1.05rem; flex: none; margin-top: 0.2rem; color: var(--accent); }
 .state-icon svg { width: 1.6rem; height: 1.6rem; }
 @keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(0.99); } to { opacity: 1; transform: none; } }
 

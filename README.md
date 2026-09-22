@@ -58,6 +58,11 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
   suggests matching shortcuts (keyboard navigable) next to a *Search for …*
   entry; the configured shortcuts are also shown as chips under the box. A
   progress bar and button spinner show while a page is being fetched.
+* **Sign-in flows are refused, not faked.** A third-party OAuth / sign-in page
+  (`accounts.google.com`, an `/oauth/authorize` endpoint, a callback carrying
+  an authorization code) gets a clear *"Sign-in isn't supported in proxied
+  mode"* page instead of the provider's `403 origin_mismatch`. Ordinary
+  `/login`, `/signin` and `/accounts` pages keep working. See §6.
 * Whether typed or behind a shortcut, every destination is validated and
   normalised, checked against the **authorized scope**, then the
   **blacklist**, then fetched server-side over HTTP/HTTPS (SSRF address checks
@@ -198,6 +203,7 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` from the reverse proxy (`true` on Render / docker-compose; a number = proxy hop count). |
 | `CLIENT_IP_HEADER` | *(empty)* | Header set by a trusted edge with the real client IP, used for rate limiting (`true-client-ip` on Render). |
 | `PROXY_ALLOWED_DOMAINS` | *(empty)* | The **authorized scope**, comma-separated, e.g. `example.com,*.example.com` — the domains you are authorized to proxy. Required: while it is empty the homepage says so and nothing can be opened. A bare `*` authorizes **every website** (an open proxy — not used by any shipped configuration, and logged as a warning at start-up); the blacklist and SSRF checks still apply. |
+| `PROXY_AUTH_FLOW_HOSTS` | *(empty)* | Hosts whose **sign-in / OAuth flows** may be proxied because you run the application and control its OAuth client (§6). Same syntax as the scope (`app.example.com`, `*.corp.example`); `*` is refused. Empty = every authentication flow gets the explanation page. |
 | `PROXY_BLACKLIST` | *(empty)* | Blacklisted domains inside the scope, comma-separated, optional `\|reason`: `ads.example.com\|Not permitted,tracker.example`. |
 | `PROXY_SITES` | *(empty)* | Permanent **site shortcuts**, comma-separated `shortcut=destination\|Name\|Description` (name/description optional, leading `!` = disabled): `google=https://google.com\|Google\|Google Search,yt=https://youtube.com\|YouTube`. Destinations must be inside the scope. |
 | `SEARCH_PROVIDER` | `none` | Web search backend for the homepage box: `none` (off — the default everywhere), `searxng`, `brave`, `google` or `proxy`. The app never embeds a search engine; it calls the backend over HTTP. See §5. |
@@ -437,10 +443,78 @@ log only. API keys never appear in pages or logs.
   (stricter for admin login), keyed on Render's `True-Client-IP` header so a
   spoofed `X-Forwarded-For` cannot open a fresh bucket.
 
+**Sign-in and OAuth flows**
+
+A proxied page is served from the proxy's origin, not the application's. An
+OAuth 2.0 / OIDC authorization request is bound to exactly that origin and to
+the redirect URIs registered for the OAuth client, so the provider refuses it —
+Google answers `403 origin_mismatch`. The only ways to make it succeed would be
+to forge the origin or rewrite the OAuth parameters, i.e. to defeat a control
+that protects the visitor's account. **AnonView does neither.** It stops the
+request *before* the provider is contacted and shows
+*"Sign-in isn't supported in proxied mode"* (`501`, `src/security/auth-flow.js`).
+
+* **Nothing is intercepted.** No password, authorization code, access or
+  refresh token, client secret or authentication cookie is captured, logged,
+  modified or stored, and there is no code that could do so. A refused flow
+  never leaves the proxy at all. Query strings are never logged (proxied URLs
+  appear as `/p/https/host/…`), and a destination that has to be named on a
+  page — a stopped redirect — has its query values redacted first.
+* **Ordinary logins still work.** Detection is conservative: a bare `/login`,
+  `/signin` or `/accounts` page is proxied as usual, and a username/password
+  form POST is relayed byte for byte, unread. A request is treated as
+  authentication only when it carries OAuth material (`access_token`,
+  `id_token`, `refresh_token`, `SAMLResponse`, a `code`+`state` pair that
+  really looks like OAuth), looks like an authorization request (`client_id`
+  with `response_type`/`redirect_uri`/`scope`/`code_challenge`), is hosted on a
+  dedicated identity provider (`accounts.google.com`,
+  `login.microsoftonline.com`, an Auth0/Okta tenant …), or sits on an
+  unmistakable endpoint (`/oauth/…`, `/o/oauth2/…`, `/connect/authorize`,
+  `/protocol/openid-connect/…`, `/signin-oidc`, `/saml/…`, `/auth/google`).
+* **The authorization boundary comes first.** Scope and blacklist are checked
+  before any of this, so an identity provider outside the authorized scope is
+  simply "not authorized" as before.
+* To sign in, open the website directly in a normal browser tab. Browsing the
+  rest of it through the proxy keeps working.
+
+**If you own the application and its OAuth client**
+
+Only for applications *you* run. Never change, and never assume anything about,
+a third party's OAuth configuration.
+
+1. In your own OAuth client, register the origin this proxy is served from and
+   the redirect URI the flow will actually come back to. For a Render
+   deployment the origin is `https://<your-service>.onrender.com`, and a
+   proxied callback URL has the form
+   `https://<your-service>.onrender.com/p/https/<your-app-host>/<callback path>`.
+2. Then list those application hosts in `PROXY_AUTH_FLOW_HOSTS`
+   (`app.example.com`, `*.corp.example`). Their sign-in pages are proxied like
+   any other page; the proxy still forges nothing and the provider still
+   applies every one of its own checks, so an unregistered origin or redirect
+   URI keeps failing at the provider, as it should.
+3. Sign-in traffic for those hosts then passes through your proxy. It is never
+   logged or stored, but only enable it for applications you are responsible
+   for.
+
+**Google OAuth specifically** (Google Cloud console → *APIs & Services* →
+*Credentials* → your OAuth 2.0 Client ID):
+
+* **Authorized JavaScript origins** must match the actual origin the
+  application is served from — scheme, host and port only, no path and no
+  trailing slash (`https://your-service.onrender.com`). A mismatch is exactly
+  what produces `403 origin_mismatch`.
+* **Authorized redirect URIs** must match the redirect URI *exactly*, as a
+  full URL including scheme, host, port and path. Google does not accept
+  wildcards, and a trailing slash or a different path is a different URI.
+* Both lists belong to *your* client ID. A client ID you do not own cannot be
+  made to accept this proxy's origin, and AnonView will not pretend otherwise.
+
 **Between visitor and proxy**
 
 * Upstream cookies never reach the browser; they live in a signed, HttpOnly,
-  SameSite, `Secure` (over HTTPS) session on the server and expire.
+  SameSite, `Secure` (over HTTPS) session on the server and expire. The jar is
+  in memory only for the session's lifetime (`SESSION_TTL`), is never written
+  to disk, never logged and never shown; nothing inspects it for credentials.
 * `Cookie`, `Authorization`, `X-Forwarded-*`, `Sec-Fetch-*`, CDN headers and
   other client-identifying headers are never forwarded upstream; `Referer` and
   `Origin` are rewritten to their upstream form; a `Via` header identifies the
@@ -467,7 +541,8 @@ log only. API keys never appear in pages or logs.
   cap sized for Render's free instance; no secrets in the image or repo.
 
 See `test/ssrf.test.js`, `test/blacklist.test.js`, `test/sites.test.js`,
-`test/search.test.js`, `test/routing.test.js` and `test/render.test.js` for
+`test/search.test.js`, `test/auth-flow.test.js`, `test/routing.test.js` and
+`test/render.test.js` for
 the executable version of these guarantees.
 
 ### Admin area
@@ -746,6 +821,8 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 | Start-up fails mentioning `PROXY_SITES` | An entry is malformed (`shortcut=destination`), has an invalid shortcut (letters, digits, `-`, `_` only), a duplicate shortcut, or an invalid destination (IP, port, credentials, non-http scheme). Out-of-scope destinations only log a warning. |
 | First request after a pause is slow | Free-tier spin-down (§11). |
 | Website not authorized | Add the domain (and its subdomains with `*.`) to `PROXY_ALLOWED_DOMAINS` — only domains you are authorized to proxy. An empty scope authorizes nothing and is reported on the homepage. |
+| Google shows `403 origin_mismatch`, or a site's "Sign in with …" button fails | Expected: an identity provider validates the application's own origin, which a proxy cannot satisfy without forging it. The proxy now stops such flows first and shows *"Sign-in isn't supported in proxied mode"*. Sign in with the site opened directly; if you run the application and its OAuth client, see §6 and `PROXY_AUTH_FLOW_HOSTS`. |
+| "Sign-in isn't supported in proxied mode" on an ordinary page | Detection needs OAuth material, an authorization-request shape, an identity-provider host or an OAuth endpoint path — check whether the URL carries `client_id`/`code`/`access_token` or sits under `/oauth/…`. For an application you run yourself, list its host in `PROXY_AUTH_FLOW_HOSTS`. |
 | A page looks broken | Its assets may come from an unlisted CDN (allow it) or it relies on WebSockets/service workers (unsupported). |
 | `503 The proxy is busy` | `MAX_CONCURRENT_UPSTREAM` reached — raise it or check for a slow upstream. |
 | `429 Too many requests` for a legitimate user | Raise `RATE_LIMIT`; on Render the limiter keys on `True-Client-IP`. |
@@ -772,7 +849,7 @@ proxy/
 │   ├── store.js             atomic JSON persistence / memory mode
 │   ├── audit.js             recent configuration changes (in memory)
 │   ├── sessions.js          in-memory sessions with cookie jars (TTL, LRU)
-│   ├── security/            address policy, hostname rules, safe DNS lookup, target parsing, scrypt passwords
+│   ├── security/            address policy, hostname rules, safe DNS lookup, target parsing, sign-in/OAuth detection, scrypt passwords
 │   ├── tools/               hash-password CLI
 │   ├── upstream/            HTTP client, header hygiene, decompression, byte limits
 │   ├── rewrite/             URL/srcset, CSS, charset handling, streaming HTML rewriter

@@ -90,6 +90,28 @@ export class ServiceBusyError extends ProxyError {
   }
 }
 
+/**
+ * A third-party sign-in / OAuth flow that cannot work through the proxy.
+ *
+ * The identity provider validates the application's origin and its registered
+ * redirect URIs; a proxied page is served from the proxy's origin, so the
+ * provider refuses it (Google: `403 origin_mismatch`). Making it "work" would
+ * mean forging the origin or rewriting the OAuth parameters, which this proxy
+ * will not do. The request is stopped before the provider is contacted, and
+ * `extra` carries only the hostname and a category - never a code, token,
+ * cookie or any other part of the query.
+ */
+export class AuthFlowUnsupportedError extends ProxyError {
+  constructor(hostname, { kind = '', origin = '' } = {}) {
+    super(
+      'AUTH_FLOW_UNSUPPORTED',
+      501,
+      'This website uses an authentication provider that requires its original website origin. The proxy cannot safely modify that authentication flow.',
+      { hostname, kind, origin }
+    );
+  }
+}
+
 /** The configured search provider failed or is not configured. */
 export class SearchUnavailableError extends ProxyError {
   constructor(message = 'Search is temporarily unavailable. Please try again in a moment.') {
