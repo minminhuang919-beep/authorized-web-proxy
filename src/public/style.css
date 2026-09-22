@@ -186,6 +186,8 @@ svg { width: 1em; height: 1em; vertical-align: -0.15em; }
 .btn-danger { background: transparent; color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
 .btn-danger:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
 .btn-sm { padding: 0.45rem 0.8rem; font-size: 0.85rem; }
+/* The sign-in hand-off: the one action that leaves the proxy is the obvious one. */
+.btn-lg { padding: 0.8rem 1.4rem; font-size: 1.02rem; font-weight: 650; }
 .btn-block { width: 100%; }
 .btn svg { width: 1.1em; height: 1.1em; }
 .spinner {

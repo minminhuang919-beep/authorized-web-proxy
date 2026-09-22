@@ -1,19 +1,31 @@
 /**
- * Detection of third-party sign-in / OAuth flows that cannot work through the
- * proxy.
+ * Detection of third-party sign-in / OAuth flows, and the hand-off to the
+ * visitor's own browser.
  *
- * WHY THEY CANNOT WORK. An OAuth 2.0 / OIDC authorization request is bound to
- * the application's own origin and to redirect URIs registered with the
- * identity provider. A proxied page is served from the proxy's origin, so the
- * provider refuses the request — Google answers `403 origin_mismatch`. The
- * only ways to make the provider accept it would be to forge the origin or to
- * rewrite the OAuth parameters, i.e. to defeat a control that exists to
- * protect the visitor's account. This proxy does neither. It stops *before*
- * contacting the provider and explains the situation
- * (`AuthFlowUnsupportedError` → the "Sign-in isn't supported in proxied mode"
- * page). Nothing about the flow is captured, logged, modified or stored: no
- * passwords, authorization codes, access/refresh tokens, client secrets or
- * authentication cookies.
+ * WHY THEY CANNOT BE PROXIED. An OAuth 2.0 / OIDC authorization request is
+ * bound to the application's own origin and to redirect URIs registered with
+ * the identity provider. A proxied page is served from the proxy's origin, so
+ * the provider refuses the request — Google answers `403 origin_mismatch`.
+ * The only ways to make the provider accept it would be to forge the origin or
+ * to rewrite the OAuth parameters, i.e. to defeat a control that exists to
+ * protect the visitor's account. This proxy does neither.
+ *
+ * WHAT IT DOES INSTEAD. It stops *before* contacting the provider and hands
+ * the visitor off to the normal browser flow: `AuthFlowUnsupportedError`
+ * → the "Sign-in required" page, whose *Continue to sign in* button is an
+ * ordinary link to the provider's (or the application's) real origin, opened
+ * outside the proxy. Nothing about the flow is captured, logged, modified or
+ * stored: no passwords, authorization codes, access/refresh tokens, client
+ * secrets, authentication cookies, `state` or `nonce`.
+ *
+ * THE HAND-OFF LINK NEVER CARRIES OAUTH PARAMETERS. `buildSignInHandoff()`
+ * only ever produces a scheme + host (+ path) URL with the query string and
+ * fragment removed. It does not copy `client_id`, `redirect_uri`, `state`,
+ * `nonce`, `code` or a token into the page, and it does not construct an
+ * authorization request of its own: a flow that was interrupted here has to be
+ * started again by the application in the browser, which is also the only way
+ * it can work — the application's session cookie lives in this proxy's
+ * server-side jar, not in the visitor's browser.
  *
  * DETECTION IS DELIBERATELY CONSERVATIVE — an ordinary page must not be
  * mistaken for a sign-in flow. A bare `/login`, `/signin` or `/accounts` path
@@ -55,15 +67,21 @@ const IDENTITY_PROVIDER_HOSTS = new Set([
   'login.live.com',
   'login.windows.net',
   'appleid.apple.com',
+  'idmsa.apple.com',
   'login.yahoo.com',
   'auth.atlassian.com',
+  'id.atlassian.com',
   'signin.aws.amazon.com',
   'oauth.telegram.org',
-  'id.twitch.tv'
+  'id.twitch.tv',
+  'accounts.spotify.com',
+  'auth.openai.com',
+  'login.salesforce.com',
+  'secure.login.gov'
 ]);
 
 /** Per-tenant identity providers, matched on the registrable suffix. */
-const IDENTITY_PROVIDER_SUFFIXES = ['.auth0.com', '.okta.com', '.oktapreview.com', '.b2clogin.com', '.onelogin.com', '.duosecurity.com'];
+const IDENTITY_PROVIDER_SUFFIXES = ['.auth0.com', '.okta.com', '.oktapreview.com', '.b2clogin.com', '.ciamlogin.com', '.onelogin.com', '.duosecurity.com'];
 
 /** Unmistakable OAuth/OIDC/SAML endpoints, matched on whole path segments. */
 const AUTH_ENDPOINT_RE = /(^|\/)(oauth2?|o\/oauth2|connect\/authorize|protocol\/openid-connect|signin-oidc|signin-google|saml2?|sso\/saml)(\/|$)/;
@@ -87,6 +105,7 @@ const SENSITIVE_PARAMS = new Set([
   'token',
   'id_token_hint',
   'session_state',
+  'nonce',
   'login_hint',
   'password',
   'passwd',
@@ -170,6 +189,70 @@ export function detectAuthFlow(url) {
   if (isIdentityProviderHost(host)) return { kind: 'identity-provider', host };
   if (isAuthEndpointPath(path)) return { kind: 'oauth-endpoint', host };
   return null;
+}
+
+/**
+ * Reduce a URL to the part that is safe to put in a link: scheme, host and
+ * (optionally) path. The query string and the fragment are dropped outright,
+ * so an authorization code, token, `state` or `nonce` can never travel in a
+ * hand-off link. Returns '' for anything that is not http(s).
+ * @param {URL} url
+ * @param {{ keepPath?: boolean }} [opts]
+ */
+function bareUrl(url, { keepPath = false } = {}) {
+  if (!url || (url.protocol !== 'http:' && url.protocol !== 'https:')) return '';
+  const path = keepPath && url.pathname && url.pathname !== '/' ? url.pathname : '/';
+  return `${url.origin}${path}`;
+}
+
+/**
+ * Where to send the visitor so they can sign in normally, in their own
+ * browser, outside the proxy.
+ *
+ * Nothing is invented and nothing is copied: the result is only ever an origin
+ * (plus, for an application's own sign-in route, that route's path). No OAuth
+ * parameter is carried over, no redirect URI is constructed, and the provider
+ * is never asked to send anyone back to this proxy.
+ *
+ *   identity-provider  the provider's own front door (appleid.apple.com/)
+ *   oauth-endpoint     the application's sign-in route (site/auth/google),
+ *                      which is exactly what starts the flow normally
+ *   oauth-authorize    the application's / provider's origin. The authorization
+ *   oauth-callback     request cannot be replayed — the application's session
+ *                      lives in this proxy's cookie jar — so the flow has to be
+ *                      started again from the site itself.
+ *
+ * `returnTo` is the page the visitor was on when the flow started. It is kept
+ * only as a plain origin+path link so they can pick up where they left off;
+ * it is never turned into a redirect URI or handed to the provider.
+ *
+ * @param {URL} url the stopped authentication target
+ * @param {{ kind?: string, returnTo?: URL|string|null }} [opts]
+ * @returns {{ signInUrl: string, signInHost: string, returnUrl: string, returnHost: string }}
+ */
+export function buildSignInHandoff(url, { kind = '', returnTo = null } = {}) {
+  const empty = { signInUrl: '', signInHost: '', returnUrl: '', returnHost: '' };
+  if (!(url instanceof URL)) return empty;
+  const signInUrl = bareUrl(url, { keepPath: kind === 'oauth-endpoint' });
+  if (!signInUrl) return empty;
+
+  let back = null;
+  if (returnTo) {
+    try {
+      back = returnTo instanceof URL ? new URL(returnTo.href) : new URL(String(returnTo));
+    } catch {
+      back = null;
+    }
+  }
+  // A return link to the very page that was stopped would send the visitor
+  // straight back into the same flow, so only a different page is offered.
+  const returnUrl = back ? bareUrl(back, { keepPath: true }) : '';
+  return {
+    signInUrl,
+    signInHost: url.hostname,
+    returnUrl: returnUrl && returnUrl !== signInUrl ? returnUrl : '',
+    returnHost: returnUrl && returnUrl !== signInUrl ? back.hostname : ''
+  };
 }
 
 /**

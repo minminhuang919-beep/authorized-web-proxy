@@ -58,11 +58,14 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
   suggests matching shortcuts (keyboard navigable) next to a *Search for …*
   entry; the configured shortcuts are also shown as chips under the box. A
   progress bar and button spinner show while a page is being fetched.
-* **Sign-in flows are refused, not faked.** A third-party OAuth / sign-in page
-  (`accounts.google.com`, an `/oauth/authorize` endpoint, a callback carrying
-  an authorization code) gets a clear *"Sign-in isn't supported in proxied
-  mode"* page instead of the provider's `403 origin_mismatch`. Ordinary
-  `/login`, `/signin` and `/accounts` pages keep working. See §6.
+* **Sign-in is handed to your browser, never faked.** A third-party OAuth /
+  sign-in page (`appleid.apple.com`, `accounts.google.com`, an
+  `/oauth/authorize` endpoint, a callback carrying an authorization code) gets
+  a *Sign-in required* page with a **Continue to sign in** button that opens
+  the provider's own website directly, outside the proxy — instead of the
+  provider's `403 origin_mismatch`. The link is a bare origin: no OAuth
+  parameter is copied into it. Ordinary `/login`, `/signin` and `/accounts`
+  pages keep working through the proxy. See §6.
 * Whether typed or behind a shortcut, every destination is validated and
   normalised, checked against the **authorized scope**, then the
   **blacklist**, then fetched server-side over HTTP/HTTPS (SSRF address checks
@@ -213,7 +216,7 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` from the reverse proxy (`true` on Render / docker-compose; a number = proxy hop count). |
 | `CLIENT_IP_HEADER` | *(empty)* | Header set by a trusted edge with the real client IP, used for rate limiting (`true-client-ip` on Render). |
 | `PROXY_ALLOWED_DOMAINS` | *(empty)* | The **authorized scope**, comma-separated, e.g. `example.com,*.example.com` — the domains you are authorized to proxy. Required: while it is empty the homepage says so and nothing can be opened. A bare `*` authorizes **every website** (an open proxy — not used by any shipped configuration, and logged as a warning at start-up); the blacklist and SSRF checks still apply. |
-| `PROXY_AUTH_FLOW_HOSTS` | *(empty)* | Hosts whose **sign-in / OAuth flows** may be proxied because you run the application and control its OAuth client (§6). Same syntax as the scope (`app.example.com`, `*.corp.example`); `*` is refused. Empty = every authentication flow gets the explanation page. |
+| `PROXY_AUTH_FLOW_HOSTS` | *(empty)* | Hosts whose **sign-in / OAuth flows** may be proxied because you run the application and control its OAuth client (§6). Same syntax as the scope (`app.example.com`, `*.corp.example`); `*` is refused. Empty = every authentication flow gets the *Sign-in required* hand-off page. |
 | `PROXY_BLACKLIST` | *(empty)* | Blacklisted domains inside the scope, comma-separated, optional `\|reason`: `ads.example.com\|Not permitted,tracker.example`. |
 | `PROXY_SITES` | *(empty)* | Permanent **site shortcuts**, comma-separated `shortcut=destination\|Name\|Description` (name/description optional, leading `!` = disabled): `google=https://google.com\|Google\|Google Search,yt=https://youtube.com\|YouTube`. Destinations must be inside the scope. |
 | `SEARCH_PROVIDER` | `bing` | Web search backend for the homepage box: `bing` (keyless, the default), `searxng`, `brave`, `google`, `proxy`, or `none` to switch search off. The app never embeds a search engine; it calls the backend over HTTP. See §5. |
@@ -491,8 +494,40 @@ the redirect URIs registered for the OAuth client, so the provider refuses it �
 Google answers `403 origin_mismatch`. The only ways to make it succeed would be
 to forge the origin or rewrite the OAuth parameters, i.e. to defeat a control
 that protects the visitor's account. **AnonView does neither.** It stops the
-request *before* the provider is contacted and shows
-*"Sign-in isn't supported in proxied mode"* (`501`, `src/security/auth-flow.js`).
+request *before* the provider is contacted and hands the visitor off to their
+own browser: a *Sign-in required* page (`src/security/auth-flow.js`,
+`src/views/error.js`) whose **Continue to sign in** button opens the
+provider's real website in a new tab, outside the proxy, where the flow works
+normally. The HTTP status stays `501` — the proxy genuinely will not
+implement this hop — but the page reads as a hand-off, not a failure.
+
+**What the hand-off link is, and what it is not.** It is an ordinary
+`<a href>` to a **bare origin** — `https://appleid.apple.com/`,
+`https://accounts.google.com/` — opened with `target="_blank"`,
+`rel="noopener noreferrer nofollow"` and `referrerpolicy="no-referrer"`, so
+nothing about the proxy session travels with it. For an application's *own*
+sign-in route (`/auth/google`) the path is kept, because that route is exactly
+what starts the flow normally. Everything else is dropped:
+
+* no `client_id`, `redirect_uri`, `response_type`, `scope`, `state`, `nonce`,
+  `code_challenge`, `code` or token is ever copied into a link, a page or a log;
+* no redirect URI is invented, and the provider is never asked to send anyone
+  back to the proxy;
+* the page renderer refuses outright to emit a hand-off `href` that has a query
+  string or a fragment at all, whatever produced it.
+
+An interrupted authorization request cannot be replayed from the hand-off page
+anyway, and pretending otherwise would be dishonest: the application's session
+cookie lives in **this proxy's** server-side jar, not in the visitor's browser.
+So for an authorization request or a callback the button points at the
+application's (or provider's) origin and the flow is simply started again
+there, the normal way.
+
+**The return destination.** When the visitor came from a proxied page, that
+page is offered as a second link — origin and path only, query string
+dropped — so they can pick up where they left off. It is a plain link shown
+to the visitor; it is never turned into a redirect URI and never handed to the
+provider.
 
 * **Nothing is intercepted.** No password, authorization code, access or
   refresh token, client secret or authentication cookie is captured, logged,
@@ -514,8 +549,9 @@ request *before* the provider is contacted and shows
 * **The authorization boundary comes first.** Scope and blacklist are checked
   before any of this, so an identity provider outside the authorized scope is
   simply "not authorized" as before.
-* To sign in, open the website directly in a normal browser tab. Browsing the
-  rest of it through the proxy keeps working.
+* **Only the sign-in step is handed over.** Everything else about the website
+  — pages, assets, redirects, cookies, ordinary form posts — keeps going
+  through the proxy exactly as before.
 
 **If you own the application and its OAuth client**
 
@@ -875,8 +911,9 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 | Start-up fails mentioning `PROXY_SITES` | An entry is malformed (`shortcut=destination`), has an invalid shortcut (letters, digits, `-`, `_` only), a duplicate shortcut, or an invalid destination (IP, port, credentials, non-http scheme). Out-of-scope destinations only log a warning. |
 | First request after a pause is slow | Free-tier spin-down (§11). |
 | Website not authorized | Add the domain (and its subdomains with `*.`) to `PROXY_ALLOWED_DOMAINS` — only domains you are authorized to proxy. An empty scope authorizes nothing and is reported on the homepage. |
-| Google shows `403 origin_mismatch`, or a site's "Sign in with …" button fails | Expected: an identity provider validates the application's own origin, which a proxy cannot satisfy without forging it. The proxy now stops such flows first and shows *"Sign-in isn't supported in proxied mode"*. Sign in with the site opened directly; if you run the application and its OAuth client, see §6 and `PROXY_AUTH_FLOW_HOSTS`. |
-| "Sign-in isn't supported in proxied mode" on an ordinary page | Detection needs OAuth material, an authorization-request shape, an identity-provider host or an OAuth endpoint path — check whether the URL carries `client_id`/`code`/`access_token` or sits under `/oauth/…`. For an application you run yourself, list its host in `PROXY_AUTH_FLOW_HOSTS`. |
+| Google shows `403 origin_mismatch`, or a site's "Sign in with …" button fails | Expected: an identity provider validates the application's own origin, which a proxy cannot satisfy without forging it. The proxy stops such flows first and shows *Sign-in required* with a **Continue to sign in** button that opens the provider directly. If you run the application and its OAuth client, see §6 and `PROXY_AUTH_FLOW_HOSTS`. |
+| *Sign-in required* on an ordinary page | Detection needs OAuth material, an authorization-request shape, an identity-provider host or an OAuth endpoint path — check whether the URL carries `client_id`/`code`/`access_token` or sits under `/oauth/…`. For an application you run yourself, list its host in `PROXY_AUTH_FLOW_HOSTS`. |
+| Signed in with the button, but the proxied site still shows me as logged out | Expected. The sign-in happened in your own browser against the provider's site; the proxy keeps its own separate cookie jar per visitor. Continue in the tab that opened, or use the site directly for anything behind the login. |
 | A page looks broken | Its assets may come from an unlisted CDN (allow it) or it relies on WebSockets/service workers (unsupported). |
 | `503 The proxy is busy` | `MAX_CONCURRENT_UPSTREAM` reached — raise it or check for a slow upstream. |
 | `429 Too many requests` for a legitimate user | Raise `RATE_LIMIT`; on Render the limiter keys on `True-Client-IP`. |

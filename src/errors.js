@@ -91,23 +91,28 @@ export class ServiceBusyError extends ProxyError {
 }
 
 /**
- * A third-party sign-in / OAuth flow that cannot work through the proxy.
+ * A third-party sign-in / OAuth flow that cannot be relayed through the proxy.
  *
  * The identity provider validates the application's origin and its registered
  * redirect URIs; a proxied page is served from the proxy's origin, so the
  * provider refuses it (Google: `403 origin_mismatch`). Making it "work" would
  * mean forging the origin or rewriting the OAuth parameters, which this proxy
- * will not do. The request is stopped before the provider is contacted, and
- * `extra` carries only the hostname and a category - never a code, token,
- * cookie or any other part of the query.
+ * will not do. The request is stopped before the provider is contacted and the
+ * visitor is handed off to their normal browser instead (the "Sign-in
+ * required" page).
+ *
+ * `extra` carries only what that page needs and nothing else: the hostname, a
+ * category, and hand-off links that are plain origins (plus, for an
+ * application's own sign-in route, its path). Never a code, token, cookie,
+ * `state`, `nonce` or any other part of the query.
  */
 export class AuthFlowUnsupportedError extends ProxyError {
-  constructor(hostname, { kind = '', origin = '' } = {}) {
+  constructor(hostname, { kind = '', origin = '', signInUrl = '', returnUrl = '', returnHost = '' } = {}) {
     super(
       'AUTH_FLOW_UNSUPPORTED',
       501,
-      'This website uses an authentication provider that requires its original website origin. The proxy cannot safely modify that authentication flow.',
-      { hostname, kind, origin }
+      "This website uses a third-party sign-in provider that must run on the provider's original website. Sign in directly with the provider, then come back.",
+      { hostname, kind, origin, signInUrl, returnUrl, returnHost }
     );
   }
 }

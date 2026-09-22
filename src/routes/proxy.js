@@ -8,7 +8,7 @@
  */
 import { pipeline } from 'node:stream';
 import { AuthFlowUnsupportedError, DomainBlockedError, DomainNotAllowedError, InvalidUrlError, ProxyError, RequestTooLargeError } from '../errors.js';
-import { detectAuthFlow, redactUrlForDisplay } from '../security/auth-flow.js';
+import { buildSignInHandoff, detectAuthFlow, redactUrlForDisplay } from '../security/auth-flow.js';
 import { splitProxyPath, targetFromProxyPath, toProxyPath, validateTarget } from '../security/target.js';
 import { ACCEPT_ENCODING, canDecode, clientAccepts, createDecoder, normalizeEncoding } from '../upstream/decompress.js';
 import { buildUpstreamRequestHeaders, filterUpstreamResponseHeaders } from '../upstream/headers.js';
@@ -84,16 +84,23 @@ export default async function proxyRoutes(app) {
       const { target } = targetFromProxyPath(rawUrl, policy, { maxLength: config.maxUrlLength });
       const method = request.method;
 
-      // Third-party sign-in flows are refused *before* anything is sent
+      // Third-party sign-in flows are stopped *before* anything is sent
       // upstream: the identity provider validates the application's own
       // origin, which a proxy cannot satisfy without forging it. The request
       // never leaves the proxy, so no authorization code, token, password or
-      // authentication cookie is relayed, read or stored - and only the host
+      // authentication cookie is relayed, read or stored — and only the host
       // and the category are logged, never the query string.
+      //
+      // The visitor is then handed off to their own browser: the page links to
+      // the provider's (or the application's) real origin, with the query
+      // string dropped, so the flow is restarted there the normal way. The
+      // page the visitor came from is offered as the place to pick it up
+      // again; it is a plain link, never a redirect URI given to the provider.
       const authFlow = detectAuthFlow(target);
       if (authFlow && !authFlowExemptions.isExempt(target.hostname)) {
-        request.log.info({ host: target.hostname, kind: authFlow.kind }, 'sign-in flow not supported through the proxy');
-        throw new AuthFlowUnsupportedError(target.hostname, { ...authFlow, origin: target.origin });
+        request.log.info({ host: target.hostname, kind: authFlow.kind }, 'sign-in flow handed off to the browser');
+        const handoff = buildSignInHandoff(target, { kind: authFlow.kind, returnTo: upstreamReferer(request) });
+        throw new AuthFlowUnsupportedError(target.hostname, { ...authFlow, origin: target.origin, ...handoff });
       }
 
       let session = readSession(request, sessions);
@@ -173,8 +180,11 @@ export default async function proxyRoutes(app) {
           const redirectFlow = detectAuthFlow(resolved);
           if (redirectFlow && !authFlowExemptions.isExempt(resolved.hostname)) {
             res.body.destroy();
-            request.log.info({ host: resolved.hostname, kind: redirectFlow.kind }, 'sign-in redirect not supported through the proxy');
-            throw new AuthFlowUnsupportedError(resolved.hostname, { ...redirectFlow, origin: resolved.origin });
+            request.log.info({ host: resolved.hostname, kind: redirectFlow.kind }, 'sign-in redirect handed off to the browser');
+            // The page that redirected is where the visitor was, so it is the
+            // natural place to sign in from once they are out of the proxy.
+            const handoff = buildSignInHandoff(resolved, { kind: redirectFlow.kind, returnTo: target });
+            throw new AuthFlowUnsupportedError(resolved.hostname, { ...redirectFlow, origin: resolved.origin, ...handoff });
           }
           try {
             const validated = validateTarget(resolved, policy);
