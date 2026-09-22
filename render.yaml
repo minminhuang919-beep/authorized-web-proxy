@@ -87,24 +87,26 @@ services:
         value: "true"
 
       # ---- search box: shortcuts and web search -----------------------------------
-      # Shortcuts and website addresses always work. Free-text web search needs
-      # a search backend, which this service does NOT host: Render's free plan
-      # is a single 512 MB / 0.1 CPU web service with no private services, and
-      # running a metasearch engine (SearXNG) beside the proxy in that container
-      # is not reliable — see README §11. Until a backend is configured the
-      # results page says "Web search isn't set up yet"; everything else works.
+      # Web search is ON and needs nothing else: `bing` reads Bing's RSS result
+      # feed (https://www.bing.com/search?q=…&format=rss) with plain HTTPS —
+      # no account, no API key, no second service, ~4 KB per query. That is
+      # what makes it usable here: this free instance is a single 512 MB /
+      # 0.1 CPU web service with no private services, so it can neither host a
+      # metasearch engine nor reach the engines that blackhole datacentre
+      # addresses (DuckDuckGo and Mojeek both refuse connections from Render).
       #
-      # To enable search, add these in the Environment tab (README §5):
+      # To use a different backend instead, override these in the Environment
+      # tab (README §5, or the admin "Search" page for a live check):
       #   SEARCH_PROVIDER=searxng  SEARCH_PROVIDER_URL=https://<your-searxng>/
-      #     a SearXNG instance you host (any plan with private services, another
-      #     provider, or your own machine) with `json` in its search.formats
+      #     a SearXNG instance you host, with `json` in its search.formats
       #   SEARCH_PROVIDER=brave    SEARCH_API_KEY=<key>
       #   SEARCH_PROVIDER=google   SEARCH_API_KEY=<key>  SEARCH_ENGINE_ID=<cx>
       #   SEARCH_PROVIDER=proxy    SEARCH_PROVIDER_URL=https://<search site>/?q={q}
-      #     no API: the query is opened on that search website through the proxy;
-      #     its host must be inside PROXY_ALLOWED_DOMAINS.
+      #     no results page: the query is opened on that search website through
+      #     the proxy; its host must be inside PROXY_ALLOWED_DOMAINS.
+      #   SEARCH_PROVIDER=none     web search off; shortcuts and addresses still work
       - key: SEARCH_PROVIDER
-        value: none
+        value: bing
       - key: SEARCH_TIMEOUT
         value: "10"
       - key: SEARCH_RATE_LIMIT

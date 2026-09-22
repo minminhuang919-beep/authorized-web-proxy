@@ -12,6 +12,7 @@
  *   POST /admin/sites/:id            update (HTML form); PUT/PATCH = JSON API
  *   POST /admin/sites/:id/toggle     enable/disable (HTML form)
  *   DELETE /admin/sites/:id          remove (JSON API); POST /admin/sites/:id/delete = HTML form
+ *   GET  /admin/search               search-backend diagnostics (live connectivity test)
  *   GET  /admin/settings             authorized scope + configuration
  *   POST /admin/domains, /admin/domains/remove   authorized scope changes
  *   GET/POST /admin/login, POST /admin/logout
@@ -28,6 +29,7 @@ import { loginPage } from '../views/admin/login.js';
 import { dashboardPage } from '../views/admin/dashboard.js';
 import { blacklistPage } from '../views/admin/blacklist.js';
 import { settingsPage } from '../views/admin/settings.js';
+import { searchDiagnosticsPage } from '../views/admin/search.js';
 import { siteEditPage, sitesPage } from '../views/admin/sites.js';
 import { ProxyError } from '../errors.js';
 
@@ -55,7 +57,7 @@ function searchSummary(search) {
 }
 
 export default async function adminRoutes(app) {
-  const { config, sessions, allowlist, blacklist, sites, audit } = app;
+  const { config, sessions, allowlist, blacklist, sites, audit, search } = app;
 
   if (!config.admin.enabled) {
     // Admin disabled: behave as if the area does not exist.
@@ -409,12 +411,33 @@ export default async function adminRoutes(app) {
     return reply.redirect('/admin/sites', 303);
   });
 
+  // ---- search diagnostics ----------------------------------------------------------
+  // Shows provider / provider URL / connectivity, and nothing that could leak:
+  // the live check reports only whether the backend answered.
+  app.get('/search', { preHandler: requireAdmin, config: { rateLimit: generalRateLimit } }, async (request, reply) => {
+    const urlRequired = ['searxng', 'proxy'].includes(config.search.provider);
+    const keyRequired = ['brave', 'google'].includes(config.search.provider);
+    const check = await search.check();
+    request.log.info({ provider: search.kind, ok: check.ok, ms: check.ms }, 'search connectivity checked');
+    return reply.type('text/html; charset=utf-8').send(
+      searchDiagnosticsPage({
+        provider: { kind: search.kind, label: search.label, configured: search.configured, reason: search.reason, mode: search.mode, defaultEndpoint: search.defaultEndpoint },
+        check,
+        urlRequired,
+        urlConfigured: Boolean(config.search.url),
+        keyRequired,
+        keyConfigured: Boolean(config.search.apiKey),
+        csrfToken: request.adminSession.csrfToken
+      })
+    );
+  });
+
   // ---- settings: authorized scope + configuration -----------------------------------
   const settingsRows = () => [
     { label: 'Authorized scope (environment)', value: config.allowedDomains.join(', ') || '—', env: 'PROXY_ALLOWED_DOMAINS' },
     { label: 'Blacklist (environment)', value: config.blacklistEnv || '—', env: 'PROXY_BLACKLIST' },
     { label: 'Site shortcuts (environment)', value: config.sitesEnv || '—', env: 'PROXY_SITES' },
-    { label: 'Web search', value: searchSummary(config.search), env: 'SEARCH_PROVIDER' },
+    { label: 'Web search', value: searchSummary(config.search), env: 'SEARCH_PROVIDER', href: '/admin/search' },
     { label: 'Admin data storage', value: config.adminStorage === 'file' ? 'file (data directory)' : 'memory (ephemeral)', env: 'ADMIN_STORAGE' },
     { label: 'Links to unlisted domains', value: config.unlistedUrlMode === 'proxy' ? 'routed through the proxy (blocked)' : 'left direct', env: 'PROXY_UNLISTED_URL_MODE' },
     { label: 'Rate limit', value: `${config.rateLimit} requests / ${config.rateLimitWindowMs / 1000}s per client`, env: 'RATE_LIMIT' },

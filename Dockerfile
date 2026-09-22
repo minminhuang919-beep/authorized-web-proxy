@@ -5,10 +5,10 @@
 #
 # The image contains the Node application and its production dependencies —
 # nothing else. Web search is NOT built into this image: it is an external
-# backend the app talks to over HTTP (SEARCH_PROVIDER + SEARCH_PROVIDER_URL).
-# docker-compose runs the official SearXNG container next to this one on a
-# private network; on Render, point SEARCH_PROVIDER_URL at a SearXNG instance
-# you host elsewhere, or use a search API. See README §5 and §11.
+# backend the app calls over HTTP (SEARCH_PROVIDER). The default, `bing`,
+# needs no URL, no key and no second container; docker-compose can also run
+# the official SearXNG image next to this one on a private network
+# (`--profile searxng`). See README §5 and §11.
 #
 # Multi-arch: no native addons, so the same file builds on amd64 and arm64.
 

@@ -1,7 +1,8 @@
 /**
- * A local stand-in for the search APIs (SearXNG / Brave / Google shapes).
- * The behaviour is keyed on the query so one endpoint per shape covers
- * results, empty, error, invalid JSON, rate limiting and timeouts.
+ * A local stand-in for the search backends (SearXNG / Brave / Google JSON
+ * shapes and Bing's RSS feed). The behaviour is keyed on the query so one
+ * endpoint per shape covers results, empty, error, invalid payload, rate
+ * limiting and timeouts.
  */
 import http from 'node:http';
 
@@ -32,6 +33,16 @@ function results(page) {
   ];
 }
 
+/** Drop markup: an RSS feed carries plain text with XML entities. */
+function flat(value) {
+  return String(value).replace(/<[^>]*>/g, '');
+}
+
+/** XML-escape a value that is not already entity-encoded. */
+function esc(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 export function createMockSearch() {
   const requests = [];
   const server = http.createServer((req, res) => {
@@ -54,6 +65,10 @@ export function createMockSearch() {
       }, 2500).unref();
     }
     const empty = q === 'empty';
+    const xml = (status, body) => {
+      res.writeHead(status, { 'content-type': 'application/rss+xml; charset=utf-8' });
+      res.end(body);
+    };
     // "chain": results whose destinations exercise the full open chain
     // (authorized, unauthorized, blacklisted, SSRF, redirect-to-unauthorized).
     if (q === 'chain' && url.pathname === '/search') {
@@ -61,6 +76,23 @@ export function createMockSearch() {
         query: q,
         results: CHAIN_RESULTS.map((r) => ({ title: r.title, url: r.url, content: r.snippet, engine: 'mock' }))
       });
+    }
+    // Bing answers with RSS, and with the *same* first page whatever `first`
+    // says — exactly what the real feed does.
+    if (url.pathname === '/bing') {
+      if (q === 'badjson') return xml(200, '<rss><channel><item><title>unterminated');
+      // A real feed carries plain text, not markup: tags are gone and only
+      // XML entities remain (`&amp;` in a snippet, `&amp;` joining URL params).
+      const items = empty
+        ? ''
+        : results(1)
+            .map((r) => `<item><title>${flat(r.title)}</title><link>${flat(r.url)}</link><description>${flat(r.snippet)}</description><pubDate>Tue, 22 Sep 2026 06:38:00 GMT</pubDate></item>`)
+            .join('');
+      return xml(
+        200,
+        `<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel><title>Bing: ${esc(q)}</title><link>http://www.bing.com:80/search?q=${encodeURIComponent(q)}</link>` +
+          `<description>Search results</description><image><url>http://www.bing.com:80/s/a/rsslogo.gif</url><title>${esc(q)}</title><link>http://www.bing.com:80/search?q=${encodeURIComponent(q)}</link></image>${items}</channel></rss>`
+      );
     }
     switch (url.pathname) {
       case '/search': {

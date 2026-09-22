@@ -61,7 +61,7 @@ describe('search provider abstraction', () => {
       const data = await provider.search('hockey', { page: 2 });
       assert.deepEqual(Object.keys(data).sort(), ['hasNext', 'page', 'provider', 'query', 'related', 'results', 'total']);
       assert.equal(data.page, 2);
-      assert.ok(data.results.every((r) => /^https?:\/\//.test(r.url) && typeof r.title === 'string' && typeof r.snippet === 'string' && typeof r.host === 'string'));
+      assert.ok(data.results.every((r) => /^https?:\/\//.test(r.url) && typeof r.title === 'string' && typeof r.snippet === 'string' && typeof r.domain === 'string'));
       assert.ok(data.results.every((r) => !/<[a-z]/i.test(r.title) && !/<[a-z]/i.test(r.snippet)), 'plain text only');
       const req = api.last();
       assert.equal(req.path, '/search');
@@ -295,8 +295,9 @@ describe('deployment: the search backend is external, never built from source', 
     assert.equal((text.match(/^\s*-\s*type: web$/gm) || []).length, 1, 'a single web service');
     assert.doesNotMatch(text, /type: pserv/, 'private services are not on the free plan');
     assert.match(text, /^\s*plan: free$/m);
-    assert.match(text, /- key: SEARCH_PROVIDER\s*\n\s*value: none/, 'search off until a backend is configured');
-    assert.match(text, /SEARCH_PROVIDER_URL/, 'documents how to point at an external backend');
+    assert.match(text, /- key: SEARCH_PROVIDER\s*\n\s*value: bing/, 'a backend that works on this plan without a key');
+    assert.doesNotMatch(text, /- key: SEARCH_API_KEY/, 'the default backend needs no secret');
+    assert.match(text, /SEARCH_PROVIDER_URL/, 'documents how to point at another backend');
     assert.doesNotMatch(text, /SEARXNG_EMBEDDED|SEARXNG_PORT|SEARXNG_SECRET/, 'nothing embedded any more');
     assert.doesNotMatch(text, /maxShutdownDelaySeconds/);
   });
@@ -309,7 +310,9 @@ describe('deployment: the search backend is external, never built from source', 
     assert.doesNotMatch(image[1], /:latest$/, 'pinned to a dated release, not latest');
     assert.doesNotMatch(block, /^\s*(ports|build):/m, 'never published, never built from source');
     assert.match(block, /networks:\s*\n\s*- internal/);
-    assert.match(compose, /SEARCH_PROVIDER_URL: http:\/\/searxng:8080/);
+    assert.match(block, /profiles: \["searxng"\]/, 'optional: the stack runs without it');
+    assert.match(compose, /SEARCH_PROVIDER: \$\{SEARCH_PROVIDER:-bing\}/, 'the keyless backend by default');
+    assert.match(compose, /http:\/\/searxng:8080/, 'documents the private backend URL');
     assert.doesNotMatch(compose, /SEARXNG_EMBEDDED/);
     const settings = await fs.readFile(path.join(ROOT, 'deploy/searxng/settings.yml'), 'utf8');
     assert.match(settings, /^\s*- json\b/m, 'JSON API enabled for the provider');
@@ -320,7 +323,7 @@ describe('deployment: the search backend is external, never built from source', 
 });
 
 describe('search is optional: an unconfigured backend never breaks the proxy', () => {
-  test('SEARCH_PROVIDER without its URL disables search instead of failing start-up', async () => {
+  test('SEARCH_PROVIDER without its URL fails the search instead of failing start-up', async () => {
     const config = loadConfig({ NODE_ENV: 'test', SESSION_SECRET: 's'.repeat(40), SEARCH_PROVIDER: 'searxng' });
     assert.equal(config.search.configured, false);
     assert.match(config.search.reason, /SEARCH_PROVIDER_URL/);
@@ -328,8 +331,9 @@ describe('search is optional: an unconfigured backend never breaks the proxy', (
     const ctx = await createTestApp({ env: { SEARCH_PROVIDER: 'searxng', PROXY_SITES: SITES } });
     try {
       const res = await ctx.app.inject({ method: 'GET', url: '/search?q=geoguessr' });
-      assert.equal(res.statusCode, 200);
-      assert.match(res.body, /Web search isn't set up yet/);
+      assert.equal(res.statusCode, 502);
+      assert.match(res.body, /Search is temporarily unavailable/);
+      assert.doesNotMatch(res.body, /Web search isn't set up yet/, 'the feature exists, it is only misconfigured');
       assert.doesNotMatch(res.body, /SEARCH_PROVIDER_URL/, 'the reason is for administrators, not visitors');
 
       const health = JSON.parse((await ctx.app.inject({ method: 'GET', url: '/health' })).body);

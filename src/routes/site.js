@@ -119,11 +119,17 @@ export default async function siteRoutes(app) {
     return renderSearch(request, reply, resolved.query, page);
   }
 
+  /**
+   * The results page. "Web search isn't set up yet" is reserved for
+   * SEARCH_PROVIDER=none (`mode: 'off'`); with any provider selected the
+   * search is actually attempted, and a configuration gap surfaces as
+   * "Search is temporarily unavailable" like any other backend failure.
+   */
   async function renderSearch(request, reply, query, page) {
     const model = { ...pageModel(request), query, page, provider: search.label, searchReason: search.reason || '' };
     const send = (status, extra) => reply.code(status).type('text/html; charset=utf-8').send(searchPage({ ...model, ...extra }));
+    if (search.mode === 'off') return send(200, { state: 'unconfigured' });
     if (search.mode === 'redirect') return reply.redirect(toProxyPath(search.targetFor(query)), 302);
-    if (!search.enabled) return send(200, { state: 'unconfigured' });
     try {
       const data = await search.search(query, { page });
       const results = annotateResults(data.results, { policy });
@@ -195,6 +201,24 @@ export default async function siteRoutes(app) {
   app.get('/health', { logLevel: 'warn' }, async (_request, reply) => {
     reply.header('cache-control', 'no-store');
     return app.healthSnapshot();
+  });
+
+  // Administrator-only: does the configured search backend actually answer?
+  // Runs one real query against it. 404 rather than 401 for a signed-out
+  // visitor, so the endpoint's existence is not advertised. Never contains
+  // the backend URL, the API key or the provider's own error text.
+  app.get('/health/search', { logLevel: 'warn', config: { rateLimit: searchRateLimit } }, async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    if (!isAdmin(request)) return reply.code(404).send({ error: { status: 404, code: 'NOT_FOUND', message: 'There is nothing at this address.' } });
+    const check = await search.check();
+    return {
+      status: check.ok ? 'ok' : 'failed',
+      provider: { name: search.kind, label: search.label, configured: search.kind !== 'none' },
+      // Present/absent only — an operator-supplied backend URL is never echoed.
+      providerUrl: { configured: Boolean(config.search.url), builtIn: search.defaultEndpoint || null },
+      connectivity: { ok: check.ok, ms: check.ms, results: check.results, error: check.error || null },
+      reason: search.reason || null
+    };
   });
 
   await app.register(adminRoutes, { prefix: '/admin' });

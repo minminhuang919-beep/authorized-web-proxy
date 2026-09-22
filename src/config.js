@@ -66,12 +66,20 @@ function isHttpUrl(value) {
 }
 
 /**
+ * Every supported `SEARCH_PROVIDER` value. `search/index.js` re-exports this
+ * list so the accepted values and the implemented adapters cannot drift.
+ */
+export const SEARCH_PROVIDERS = ['none', 'bing', 'searxng', 'brave', 'google', 'proxy'];
+
+/**
  * Which required setting is missing before `provider` can answer a search?
  * Returns '' when the provider is ready to use.
  * @param {string} provider
  * @param {{ searchUrl: string, searchApiKey: string, searchEngineId: string }} settings
  */
 function searchConfigurationGap(provider, { searchUrl, searchApiKey, searchEngineId }) {
+  // `bing` needs nothing: it is keyless and has a built-in endpoint, so it is
+  // ready the moment SEARCH_PROVIDER=bing is set.
   if (provider === 'searxng' && !searchUrl) {
     return 'SEARCH_PROVIDER_URL is not set (the base URL of a SearXNG instance that has `json` in its search.formats, e.g. https://searxng.example)';
   }
@@ -166,6 +174,8 @@ export function loadConfig(env = process.env) {
   const dataDir = path.resolve(pick(env, 'DATA_DIR', './data'));
 
   // Web search for the homepage box: off unless SEARCH_PROVIDER is set.
+  // `bing` is the keyless default used by the Render deployment; it needs no
+  // URL and no API key, so it is configured as soon as it is selected.
   //
   // A *malformed* setting (unknown provider, non-http URL, a `proxy` template
   // without {q}) fails at start-up. A *missing* one only disables search:
@@ -173,8 +183,8 @@ export function loadConfig(env = process.env) {
   // the variable, so an incomplete search configuration can never take the
   // whole proxy down — the results page reports that search is not set up.
   const searchProvider = pick(env, 'SEARCH_PROVIDER', 'none').trim().toLowerCase();
-  if (!['none', 'searxng', 'brave', 'google', 'proxy'].includes(searchProvider)) {
-    throw new ConfigError('SEARCH_PROVIDER must be one of: none, searxng, brave, google, proxy');
+  if (!SEARCH_PROVIDERS.includes(searchProvider)) {
+    throw new ConfigError(`SEARCH_PROVIDER must be one of: ${SEARCH_PROVIDERS.join(', ')}`);
   }
   // SEARCH_PROVIDER_URL is the backend's URL for every provider that takes one
   // (SearXNG base URL, `proxy` template, brave/google endpoint override).

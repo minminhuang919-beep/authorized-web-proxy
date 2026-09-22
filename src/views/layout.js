@@ -92,7 +92,7 @@ export const icons = {
  * @param {Raw|string} opts.body
  * @param {string} [opts.description]
  * @param {'site'|'admin'} [opts.nav]   which navigation to show
- * @param {string} [opts.active]        active nav item (`home`, `about`, `dashboard`, `sites`, `blacklist`, `settings`)
+ * @param {string} [opts.active]        active nav item (`home`, `about`, `dashboard`, `sites`, `blacklist`, `search`, `settings`)
  * @param {boolean} [opts.adminLoggedIn] show the Admin link / logout
  * @param {string|null} [opts.csrfToken] renders the logout form when set
  * @param {string} [opts.bodyClass]
@@ -100,7 +100,14 @@ export const icons = {
 export function layout({ title, body, description = 'Fast private browsing for authorized websites.', nav = 'site', active = '', adminLoggedIn = false, csrfToken = null, bodyClass = '' }) {
   const link = (href, label, key) => `<a href="${href}"${active === key ? ' aria-current="page" class="is-active"' : ''}>${esc(label)}</a>`;
   const siteLinks = [link('/', 'Home', 'home'), link('/about', 'About', 'about'), adminLoggedIn ? link('/admin', 'Admin', 'admin') : ''].join('');
-  const adminLinks = [link('/admin', 'Dashboard', 'dashboard'), link('/admin/sites', 'Sites', 'sites'), link('/admin/blacklist', 'Blacklist', 'blacklist'), link('/admin/settings', 'Settings', 'settings'), link('/', 'Site', 'site')].join('');
+  const adminLinks = [
+    link('/admin', 'Dashboard', 'dashboard'),
+    link('/admin/sites', 'Sites', 'sites'),
+    link('/admin/blacklist', 'Blacklist', 'blacklist'),
+    link('/admin/search', 'Search', 'search'),
+    link('/admin/settings', 'Settings', 'settings'),
+    link('/', 'Site', 'site')
+  ].join('');
   const logout = csrfToken
     ? `<form method="post" action="/admin/logout" class="inline-form"><input type="hidden" name="_csrf" value="${esc(csrfToken)}"><button type="submit" class="btn btn-ghost btn-sm">Log out</button></form>`
     : '';

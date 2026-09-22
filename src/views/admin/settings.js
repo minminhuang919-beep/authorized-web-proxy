@@ -59,7 +59,9 @@ export function settingsPage({ scope, persistent, settings, csrfToken, notice = 
   <h2>Configuration</h2>
   <p class="muted">Read-only view of the running configuration. Change values through the environment variables of your hosting service.</p>
   <dl class="kv">
-    ${settings.map((s) => html`<div><dt>${s.label}</dt><dd>${s.value}${s.env ? html` <code class="env">${s.env}</code>` : ''}</dd></div>`)}
+    ${settings.map(
+      (s) => html`<div><dt>${s.label}</dt><dd>${s.value}${s.env ? html` <code class="env">${s.env}</code>` : ''}${s.href ? html` <a class="small" href="${s.href}">diagnostics</a>` : ''}</dd></div>`
+    )}
   </dl>
 </section>
 

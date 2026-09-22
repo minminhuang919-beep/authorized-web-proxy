@@ -48,9 +48,9 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
   * a **website address** (`example.com/page`, `https://example.com`; the
     `https://` is optional), opened through the proxy;
   * anything else (`geoguessr`, `weather today`, `best hockey drills`) is a
-    **web search**, answered on a results page by the search provider the
-    administrator configured (`SEARCH_PROVIDER` + `SEARCH_PROVIDER_URL`;
-    search is off until a backend is configured).
+    **web search**, answered on a results page by the search backend the
+    administrator selected with `SEARCH_PROVIDER` (`bing` by default, which
+    needs nothing else; `none` switches web search off).
     A bare word is never turned into a domain — `geoguessr` is a search, not
     `geoguessr.com`.
 
@@ -105,11 +105,11 @@ that deploys it to **Render** as a free Docker web service with HTTPS.
         │   AnonView (Node 24)   │   Fastify 5, non-root user, stateless
         │   Docker web service   │   (in-memory sessions, allowlist from env);
         └──────┬──────────┬──────┘   the image holds the Node app only
-               │          │ optional JSON call to the search backend you
-               │          │ configure (SEARCH_PROVIDER + SEARCH_PROVIDER_URL)
+               │          │ one call per query to the search backend
+               │          │ (SEARCH_PROVIDER, default `bing`: keyless RSS)
                │          ▼
-               │   search backend: a SearXNG instance or a search API
-               │            (never bundled into this image)
+               │   search backend: Bing's RSS feed, a SearXNG instance
+               │   or a search API (never bundled into this image)
                │ HTTP(S) to allowlisted hosts only, via the SSRF-safe client
                ▼
         allowlisted websites
@@ -173,17 +173,27 @@ in production it is required.
 `docker-compose.yml` runs the same image behind a local Caddy instance:
 
 ```bash
-cp .env.example .env          # set SEARXNG_SECRET to any long random string
+cp .env.example .env
 docker compose up --build     # http://localhost  (Caddy on :80; with DOMAIN set, HTTPS via Let's Encrypt)
 ```
 
-Web search goes to the `searxng` service — the **official SearXNG container
-image**, pinned to a dated tag — on the internal network
-(`SEARCH_PROVIDER_URL=http://searxng:8080`), which publishes no port. Nothing
-is built from source. To try search without Docker, run any SearXNG instance
-with `json` enabled and start the app with `SEARCH_PROVIDER=searxng
-SEARCH_PROVIDER_URL=http://127.0.0.1:8888`; then open
+Web search works immediately: the app defaults to `SEARCH_PROVIDER=bing`,
+one keyless HTTPS request per query to Bing's RSS result feed, the same
+backend the Render deployment uses. Without Docker, `SEARCH_PROVIDER=bing
+node src/server.js` is enough — then open
 `http://localhost:8080/search?q=youtube`.
+
+To run the optional self-hosted metasearch backend instead — the **official
+SearXNG container image**, pinned to a dated tag, on the internal network with
+no published port:
+
+```bash
+SEARXNG_SECRET=<long random string> docker compose --profile searxng up -d --build
+# then in .env:  SEARCH_PROVIDER=searxng
+#                SEARCH_PROVIDER_URL=http://searxng:8080
+```
+
+Nothing is built from source in either case.
 
 Admin-added scope entries, blacklist entries and shortcuts are persisted in
 the `app_data` volume (`ADMIN_STORAGE=file`, the default). Caddy is only part
@@ -206,9 +216,9 @@ non-secret ones). Sizes accept `k`/`m`/`g` suffixes; durations are seconds.
 | `PROXY_AUTH_FLOW_HOSTS` | *(empty)* | Hosts whose **sign-in / OAuth flows** may be proxied because you run the application and control its OAuth client (§6). Same syntax as the scope (`app.example.com`, `*.corp.example`); `*` is refused. Empty = every authentication flow gets the explanation page. |
 | `PROXY_BLACKLIST` | *(empty)* | Blacklisted domains inside the scope, comma-separated, optional `\|reason`: `ads.example.com\|Not permitted,tracker.example`. |
 | `PROXY_SITES` | *(empty)* | Permanent **site shortcuts**, comma-separated `shortcut=destination\|Name\|Description` (name/description optional, leading `!` = disabled): `google=https://google.com\|Google\|Google Search,yt=https://youtube.com\|YouTube`. Destinations must be inside the scope. |
-| `SEARCH_PROVIDER` | `none` | Web search backend for the homepage box: `none` (off — the default everywhere), `searxng`, `brave`, `google` or `proxy`. The app never embeds a search engine; it calls the backend over HTTP. See §5. |
-| `SEARCH_PROVIDER_URL` | *(empty)* | The backend's URL: `searxng` = the instance's base URL (`http://searxng:8080` in docker-compose); `proxy` = a URL template containing `{q}` whose host is in the scope; `brave`/`google` = optional endpoint override. `SEARXNG_URL` (searxng only) and `SEARCH_URL` are accepted as aliases. |
-| `SEARXNG_SECRET` | *(empty)* | Only read by the SearXNG service in `docker-compose.yml` (any long random string). The application never uses it. |
+| `SEARCH_PROVIDER` | `bing` | Web search backend for the homepage box: `bing` (keyless, the default), `searxng`, `brave`, `google`, `proxy`, or `none` to switch search off. The app never embeds a search engine; it calls the backend over HTTP. See §5. |
+| `SEARCH_PROVIDER_URL` | *(empty)* | The backend's URL. Not needed by `bing`, which has a built-in endpoint. `searxng` = the instance's base URL (`http://searxng:8080` with docker-compose's `searxng` profile); `proxy` = a URL template containing `{q}` whose host is in the scope; `bing`/`brave`/`google` = optional endpoint override. `SEARXNG_URL` (searxng only) and `SEARCH_URL` are accepted as aliases. |
+| `SEARXNG_SECRET` | *(empty)* | Only read by the optional SearXNG service in `docker-compose.yml` (`--profile searxng`, any long random string). The application never uses it. |
 | `SEARCH_API_KEY` | *(empty)* | API key for `brave` / `google`. Never displayed or logged. |
 | `SEARCH_ENGINE_ID` | *(empty)* | `google`: the Programmable Search Engine id (`cx`). |
 | `SEARCH_TIMEOUT` | `10` | Seconds to wait for the search provider. |
@@ -350,44 +360,73 @@ Browser → proxy web app → search backend (HTTP/JSON) → proxy's own results
 
 The proxy **contains no search engine**. `src/search/index.js` is an adapter
 layer: the application only knows the `SearchProvider` interface
-(`search(query, { page })` → normalized `{ results: [{ title, url, host,
-snippet }], hasNext, total, related }`) and talks to whatever backend
-`SEARCH_PROVIDER` selects, over HTTP. No search engine is ever scraped.
+(`search(query, { page })` → normalized `{ results: [{ title, url, snippet,
+domain }], hasNext, total, related }`) and talks to whatever backend
+`SEARCH_PROVIDER` selects, over HTTP.
 
-Search is **off by default** (`SEARCH_PROVIDER=none`): the results page then
-says so and offers the shortcuts, while shortcuts and website addresses keep
-working. If a provider is selected but one of its settings is missing, search
-stays off in the same way instead of failing the process — the missing
-variable is named in the start-up log, in `/health`
-(`search.configured: false`) and, for signed-in administrators, on the
-results page. Only a *malformed* value (unknown provider, a URL that is not
-http(s), a `proxy` template without `{q}`) stops start-up.
+The default is **`bing`**, which needs no account, no API key and no service
+of your own — see *Choosing a backend* below for why that is the one that
+works on a free instance.
+
+Two states that look alike are deliberately kept apart:
+
+* **"Web search isn't set up yet"** — only with `SEARCH_PROVIDER=none`. The
+  feature is switched off; shortcuts and addresses keep working.
+* **"Search is temporarily unavailable"** — a provider *is* selected but the
+  query failed: the backend is unreachable, rate-limiting, slow, or one of
+  its settings is missing. A missing setting never disables the feature and
+  never stops the process; it is named in the start-up log, in `/health`
+  (`search.configured: false`), on `/admin/search` and, for signed-in
+  administrators, on the results page. Only a *malformed* value (unknown
+  provider, a URL that is not http(s), a `proxy` template without `{q}`)
+  stops start-up.
 
 | `SEARCH_PROVIDER` | What it does | Settings |
 |---|---|---|
-| `none` | Search off (the default). Shortcuts and addresses still work. | — |
+| `bing` | **The default.** Reads Bing's RSS result feed (`?q=…&format=rss`) over plain HTTPS and renders the results page. Keyless — no account, no quota to manage, ~4 KB per query. The feed serves one page of ten results and ignores paging parameters, so the results page offers no *next page*. | — (optional `SEARCH_PROVIDER_URL` endpoint override) |
+| `none` | Search off. Shortcuts and addresses still work. | — |
 | `searxng` | Queries a [SearXNG](https://docs.searxng.org/) instance's JSON API and renders the results page. Any instance works if `json` is listed under `search.formats` in its `settings.yml`. | `SEARCH_PROVIDER_URL` = its base URL |
 | `brave` | [Brave Search API](https://brave.com/search/api/) web results. | `SEARCH_API_KEY` |
 | `google` | [Google Programmable Search JSON API](https://developers.google.com/custom-search/v1/overview). | `SEARCH_API_KEY`, `SEARCH_ENGINE_ID` (the engine's `cx`) |
 | `proxy` | No API: the query is opened on a search **website** through the proxy itself, like any other page (Startpage-style). The website's host must be in the authorized scope and its terms apply. | `SEARCH_PROVIDER_URL` = template with `{q}`, e.g. `https://duckduckgo.com/html/?q={q}` |
 
-**Where a SearXNG backend runs**
+**Choosing a backend**
 
-* **docker-compose (local / self-hosting):** the official
-  `docker.io/searxng/searxng` image, pinned to a dated tag, runs as the
-  `searxng` service on the internal network with **no published port** and
-  `deploy/searxng/settings.yml` mounted read-only (JSON API on, limiter off,
-  moderate safe search, `public_instance: false`). The app reaches it as
-  `http://searxng:8080`; set `SEARXNG_SECRET` in `.env`. Nothing is built
-  from source, and the app image does not contain SearXNG.
-* **Render free plan:** no search backend is deployed with the service. The
-  free plan is a single 512 MB / 0.1 CPU web service and has **no private
-  services**, so a metasearch engine cannot reliably share that container
-  (§11) and a second *free* web service would be public. Point
-  `SEARCH_PROVIDER_URL` at a SearXNG instance you host elsewhere (a paid
-  Render private service, another host, your own machine), or use `brave` /
-  `google` / `proxy`. Until you do, the results page says search is not set
-  up and everything else works.
+`bing` is the default because it is the only backend that needs nothing and
+is actually reachable from a free Render instance. Measured from the deployed
+service (§11): `www.bing.com` answers, while `html.duckduckgo.com` and
+`www.mojeek.com` never complete a TCP connection from Render's address range,
+and every public SearXNG instance now sits behind a browser/bot challenge
+that returns an HTML page instead of JSON. `api.search.brave.com` and
+`www.googleapis.com` are reachable but want an API key.
+
+Use one of the others when you have a reason to:
+
+* **`searxng` — your own metasearch instance.** `docker-compose.yml` can run
+  the official `docker.io/searxng/searxng` image, pinned to a dated tag, as
+  the optional `searxng` service on the internal network with **no published
+  port** and `deploy/searxng/settings.yml` mounted read-only (JSON API on,
+  limiter off, moderate safe search, `public_instance: false`):
+
+  ```bash
+  SEARXNG_SECRET=<long random string> docker compose --profile searxng up -d
+  # then in .env:  SEARCH_PROVIDER=searxng
+  #                SEARCH_PROVIDER_URL=http://searxng:8080
+  ```
+
+  Nothing is built from source and the app image never contains SearXNG. On
+  Render the free plan has **no private services**, so such an instance has
+  to live somewhere else (a paid Render private service, another host, your
+  own machine) — see §11.
+* **`brave` / `google` — an official API** with a quota you control.
+* **`proxy` — no results page at all:** the query is opened on a search
+  website through the proxy, so that site's own page is what the visitor
+  sees. Its host must be inside `PROXY_ALLOWED_DOMAINS`.
+
+`/admin/search` (administrators only) shows which provider is configured,
+whether its URL and key are set, and the result of one live query against the
+backend — without printing any of those values. `/health/search` is the same
+information as JSON.
 
 On the built-in results page nothing is proxied automatically: every result
 links to `/open?url=…` on the proxy's own origin, so a click runs the normal
@@ -432,8 +471,9 @@ log only. API keys never appear in pages or logs.
   size limits apply to the resulting request exactly as to a typed one.
   Only administrator-configured, enabled, currently-usable shortcuts are
   ever exposed by the homepage and `/suggest`.
-* Web search is opt-in (`SEARCH_PROVIDER`), rate-limited per client, uses
-  documented JSON APIs or the proxy itself (never scraping), reduces results
+* Web search is selected by `SEARCH_PROVIDER`, rate-limited per client
+  separately from the proxy, uses published result formats (Bing's RSS feed,
+  the SearXNG/Brave/Google JSON APIs) or the proxy itself, reduces results
   to plain text and http(s) URLs, and never links out: every result opens
   through `/open`, i.e. through the same authorization → blacklist → SSRF
   chain as a typed address. A bare word typed into the box is a search, never
@@ -657,7 +697,7 @@ Predefined by `render.yaml` (change in the *Environment* tab if needed):
 `ADMIN_RATE_LIMIT=10`, `MAX_RESPONSE_SIZE=20m`, `MAX_REQUEST_SIZE=2m`,
 `REQUEST_TIMEOUT=30`, `CONNECT_TIMEOUT=10`, `TRANSFER_TIMEOUT=300`,
 `MAX_CONCURRENT_UPSTREAM=32`, `PROXY_UNLISTED_URL_MODE=direct`,
-`PROXY_SHOW_ALLOWLIST=true`, `PROXY_BANNER=true`, `SEARCH_PROVIDER=none`,
+`PROXY_SHOW_ALLOWLIST=true`, `PROXY_BANNER=true`, `SEARCH_PROVIDER=bing`,
 `SEARCH_TIMEOUT=10`, `SEARCH_RATE_LIMIT=60`.
 
 Optional variables you can add in the *Environment* tab:
@@ -667,11 +707,13 @@ Optional variables you can add in the *Environment* tab:
   this value). Their domains must also be in `PROXY_ALLOWED_DOMAINS`.
 * `PROXY_BLACKLIST` — permanent blacklist entries, format
   `domain|reason,domain2`.
-* Web search is off (`SEARCH_PROVIDER=none`) until you configure a backend:
-  `SEARCH_PROVIDER=searxng` + `SEARCH_PROVIDER_URL=https://<your-searxng>/`,
-  or `brave` / `google` with `SEARCH_API_KEY` (+ `SEARCH_ENGINE_ID`), or
-  `proxy` with a `{q}` template whose host is in the scope (§5 and §11).
-  Keep API keys in the Environment tab only.
+* Web search needs **nothing added**: `render.yaml` already sets
+  `SEARCH_PROVIDER=bing`, which takes no URL and no key. To use a different
+  backend, override it here: `SEARCH_PROVIDER=searxng` +
+  `SEARCH_PROVIDER_URL=https://<your-searxng>/`, or `brave` / `google` with
+  `SEARCH_API_KEY` (+ `SEARCH_ENGINE_ID`), or `proxy` with a `{q}` template
+  whose host is in the scope (§5 and §11). `SEARCH_PROVIDER=none` switches
+  web search off. Keep API keys in the Environment tab only, never in git.
 * `ADMIN_PASSWORD_HASH` — use it instead of `ADMIN_PASSWORD`; generate with
   `npm run hash-password`.
 
@@ -777,21 +819,33 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 * **Resources:** 512 MB RAM, 0.1 shared CPU. The image is tuned for this
   (`NODE_OPTIONS=--max-old-space-size=384`, `MAX_CONCURRENT_UPSTREAM=32`).
   Very large proxied downloads are streamed, so memory stays flat.
-* **No web search backend is included, and this is a real limitation.**
-  Render's free instance types exist only for web services, static sites,
-  Postgres and Key Value — **there are no free private services**, so a
-  SearXNG instance cannot be deployed privately next to the proxy, and a
-  second *free* web service would be public and unauthenticated. Running
-  SearXNG inside the proxy's own container is not a reliable answer either:
-  one shared 0.1 CPU (10 % of a core) and 512 MB have to cover Node's HTML
+* **Web search works, but not by hosting a search engine here.** Render's
+  free instance types exist only for web services, static sites, Postgres
+  and Key Value — **there are no free private services**, so a SearXNG
+  instance cannot be deployed privately next to the proxy, and a second
+  *free* web service would be public and unauthenticated. Running SearXNG
+  inside the proxy's own container is not a reliable answer either: one
+  shared 0.1 CPU (10 % of a core) and 512 MB have to cover Node's HTML
   rewriting *and* a Python metasearch engine that fans a query out to a
   dozen engines and parses every answer; searches would take tens of
   seconds, and an out-of-memory kill would take down the proxy itself, not
-  just search. So the free deployment ships with `SEARCH_PROVIDER=none`:
-  shortcuts, addresses and the whole proxy work, and the results page says
-  "Web search isn't set up yet" until you set `SEARCH_PROVIDER` and
-  `SEARCH_PROVIDER_URL` (§5) — a SearXNG instance you host elsewhere, a
-  paid Render private service, or a search API.
+  just search.
+
+  The free deployment therefore **calls a backend instead of hosting one**,
+  and ships with `SEARCH_PROVIDER=bing` — one HTTPS request per query to
+  Bing's RSS feed, ~4 KB back, no key, no second service. Which backends are
+  reachable from a Render instance is not a matter of taste; measured from
+  the deployed service:
+
+  | Backend | From a Render free instance |
+  |---|---|
+  | `www.bing.com` (RSS) | 200, ten results |
+  | `api.search.brave.com`, `www.googleapis.com` | reachable, API key required |
+  | `html.duckduckgo.com`, `www.mojeek.com` | TCP connection never completes (10 s timeout) |
+  | public SearXNG instances | bot challenge instead of JSON |
+
+  Use `SEARCH_PROVIDER=none` to switch web search off; shortcuts, addresses
+  and the rest of the proxy are unaffected either way.
 * **Ephemeral filesystem:** anything written to disk is lost on restart or
   redeploy, and persistent disks are not available on the free plan —
   hence `ADMIN_STORAGE=memory` and env-var driven configuration (export the
@@ -816,8 +870,8 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 | A blacklisted site still opens | Check the scope/blacklist order: only hosts inside the scope reach the blacklist; entries cover subdomains, so `example.com` also blocks `www.example.com`. |
 | A domain added in `/admin` disappeared | Expected on Render (`ADMIN_STORAGE=memory`); export it to `PROXY_BLACKLIST` / `PROXY_ALLOWED_DOMAINS` (shortcuts: `PROXY_SITES`). |
 | Typing `google` searches instead of opening the site | No enabled shortcut named `google` exists (or its destination is blacklisted / outside the scope — see the status column on the *Sites* page). |
-| "Web search isn't set up yet" | Expected on the free Render plan until a backend is configured (§11): set `SEARCH_PROVIDER` and `SEARCH_PROVIDER_URL` (or `SEARCH_API_KEY`). The start-up log and `/health` (`search.configured`) name what is missing. `proxy` mode needs the search website's host in `PROXY_ALLOWED_DOMAINS`. |
-| "Search is temporarily unavailable" | Logs show `search provider unreachable` / `search provider error` with the host and HTTP status: wrong `SEARCH_PROVIDER_URL` or API key, a SearXNG instance without `json` in `search.formats`, quota exhausted (429), or a timeout (`SEARCH_TIMEOUT`). |
+| "Web search isn't set up yet" | Shown **only** when `SEARCH_PROVIDER=none`. Set `SEARCH_PROVIDER=bing` (nothing else needed) or one of the other backends in §5. |
+| "Search is temporarily unavailable" | A provider is selected and the query failed. Open `/admin/search` as an administrator: it says whether the configuration is complete and runs a live connectivity test. Logs show `search provider unreachable` / `search provider error` with the host and HTTP status: wrong `SEARCH_PROVIDER_URL` or API key, a SearXNG instance without `json` in `search.formats`, quota exhausted (429), or a timeout (`SEARCH_TIMEOUT`). `proxy` mode needs the search website's host in `PROXY_ALLOWED_DOMAINS`. |
 | Start-up fails mentioning `PROXY_SITES` | An entry is malformed (`shortcut=destination`), has an invalid shortcut (letters, digits, `-`, `_` only), a duplicate shortcut, or an invalid destination (IP, port, credentials, non-http scheme). Out-of-scope destinations only log a warning. |
 | First request after a pause is slow | Free-tier spin-down (§11). |
 | Website not authorized | Add the domain (and its subdomains with `*.`) to `PROXY_ALLOWED_DOMAINS` — only domains you are authorized to proxy. An empty scope authorizes nothing and is reported on the homepage. |
@@ -845,7 +899,7 @@ proxy/
 │   ├── blacklist.js         blacklist (env + admin, subdomain matching, export)
 │   ├── sites.js             site directory: shortcuts (env + admin), validated destinations, suggestions, export
 │   ├── resolve.js           search-box input → shortcut | address | search query
-│   ├── search/index.js      SEARCH_PROVIDER adapters (searxng, brave, google, proxy), result sanitising/linking
+│   ├── search/index.js      SEARCH_PROVIDER adapters (bing, searxng, brave, google, proxy), result sanitising/linking
 │   ├── store.js             atomic JSON persistence / memory mode
 │   ├── audit.js             recent configuration changes (in memory)
 │   ├── sessions.js          in-memory sessions with cookie jars (TTL, LRU)
@@ -859,7 +913,7 @@ proxy/
 ├── test/                    node:test suites + local mock website and mock search API (helpers/)
 ├── Dockerfile               multi-stage Node image (app only), non-root, honours $PORT
 ├── render.yaml              Render Blueprint (free Docker web service, /health check)
-├── docker-compose.yml       local stack: app + official SearXNG image + Caddy (development / self-hosting)
+├── docker-compose.yml       local stack: app + Caddy (+ optional official SearXNG image, profile `searxng`)
 ├── deploy/caddy/Caddyfile   Caddy config for the local stack only
 ├── deploy/searxng/settings.yml  settings mounted into the official SearXNG container (JSON API, no limiter)
 └── .env.example             application settings template

@@ -1,17 +1,21 @@
 # AnonView proxy — local Docker stack (development / self-hosting).
 #
 #   app      Node.js proxy (non-root, read-only filesystem, internal port only)
-#   searxng  private search backend: the OFFICIAL SearXNG container image,
-#            internal network only, no published port, reachable solely as
-#            http://searxng:8080 from `app`
 #   caddy    local TLS edge: HTTP on :80 by default; with DOMAIN set, automatic
 #            Let's Encrypt certificates and HTTP→HTTPS redirect.
+#   searxng  OPTIONAL private search backend (profile `searxng`): the OFFICIAL
+#            SearXNG container image, internal network only, no published port,
+#            reachable solely as http://searxng:8080 from `app`.
 #
-# Production hosting uses Render (see render.yaml), which builds the same
-# app Dockerfile and terminates TLS itself. Render's free plan has no private
-# services, so the searxng service below is NOT part of that deployment:
-# there, SEARCH_PROVIDER stays `none` until an external backend is configured
-# (README §5 and §11).
+# Web search works out of the box without it: the app defaults to
+# SEARCH_PROVIDER=bing, a keyless HTTPS call to Bing's RSS result feed — the
+# same backend the Render deployment uses (render.yaml), so this stack
+# behaves like production by default.
+#
+# To run the self-hosted metasearch backend instead:
+#   SEARXNG_SECRET=... docker compose --profile searxng up -d
+# and set in `.env`:  SEARCH_PROVIDER=searxng
+#                     SEARCH_PROVIDER_URL=http://searxng:8080
 #
 # Configuration comes from `.env` (copy `.env.example`). Never commit `.env`.
 
@@ -32,12 +36,11 @@ services:
       PORT: "8080"
       TRUST_PROXY: "true"
       DATA_DIR: /data
-      # Web search through the private searxng service below (overrides .env).
-      SEARCH_PROVIDER: searxng
-      SEARCH_PROVIDER_URL: http://searxng:8080
-    depends_on:
-      searxng:
-        condition: service_started
+      # Web search: keyless, nothing to host. `.env` can override this with
+      # SEARCH_PROVIDER=searxng + SEARCH_PROVIDER_URL=http://searxng:8080 when
+      # the optional `searxng` profile is running.
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-bing}
+      SEARCH_PROVIDER_URL: ${SEARCH_PROVIDER_URL:-}
     expose:
       - "8080"
     volumes:
@@ -62,6 +65,8 @@ services:
       - internal
 
   searxng:
+    # Optional: only started with `docker compose --profile searxng up`.
+    profiles: ["searxng"]
     # Official image, pinned to a dated release (never `latest` — bump this
     # tag deliberately: https://hub.docker.com/r/searxng/searxng/tags).
     image: docker.io/searxng/searxng:2026.9.18-c0042add3
@@ -73,8 +78,9 @@ services:
       SEARXNG_BIND_ADDRESS: "0.0.0.0"
       SEARXNG_PORT: "8080"
       SEARXNG_BASE_URL: http://searxng:8080/
-      # Set SEARXNG_SECRET in .env (any long random string).
-      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
+      # Set SEARXNG_SECRET in .env (any long random string). Not `:?` — compose
+      # interpolates the whole file even when this profile is not selected.
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-set-SEARXNG_SECRET-in-dot-env}
     volumes:
       - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
       - searxng_cache:/var/cache/searxng

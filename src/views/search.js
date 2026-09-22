@@ -24,7 +24,7 @@ function searchHref(query, { page = 1, mode = 'search' } = {}) {
  * @param {object} opts
  * @param {string} opts.query
  * @param {'results'|'empty'|'error'|'unconfigured'} opts.state
- * @param {Array} [opts.results] annotated results ({ title, url, host, snippet, state, href })
+ * @param {Array} [opts.results] annotated results ({ title, url, domain, snippet, state, href })
  * @param {number} [opts.page]
  * @param {boolean} [opts.hasNext]
  * @param {number|null} [opts.total]
@@ -43,7 +43,7 @@ export function searchPage({ query, state, results = [], page = 1, hasNext = fal
   <h1 id="results-title" class="visually-hidden">Search results for ${query}</h1>
   ${state === 'results' ? resultsBlock({ query, results, page, hasNext, total, provider, related }) : ''}
   ${state === 'empty' ? emptyBlock({ query, provider, page, quickLinks }) : ''}
-  ${state === 'error' ? errorBlock({ query, page, message }) : ''}
+  ${state === 'error' ? errorBlock({ query, page, message, adminLoggedIn, searchReason }) : ''}
   ${state === 'unconfigured' ? unconfiguredBlock({ query, quickLinks, adminLoggedIn, searchReason }) : ''}
 </section>`;
   return layout({ title: state === 'unconfigured' ? 'Search' : `${query} – Search`, body, active: 'home', adminLoggedIn, bodyClass: 'page-search' });
@@ -76,7 +76,7 @@ function resultItem(r, { top = false } = {}) {
   // and shows the secure "not authorized" page for anything outside the scope.
   return html`<li class="result is-${r.state}${top ? ' is-top' : ''}">
     ${top ? html`<span class="result-kicker">Top result</span>` : ''}
-    <div class="result-source"><span class="result-host">${r.host}</span> <span class="tag ${badge.cls}" title="${badge.title}">${badge.label}</span></div>
+    <div class="result-source"><span class="result-host">${r.domain}</span> <span class="tag ${badge.cls}" title="${badge.title}">${badge.label}</span></div>
     <h2 class="result-title"><a href="${r.href}">${r.title}</a></h2>
     ${r.snippet ? html`<p class="result-snippet">${r.snippet}</p>` : ''}
   </li>`;
@@ -92,13 +92,18 @@ function emptyBlock({ query, provider, page, quickLinks }) {
 </div>`;
 }
 
-function errorBlock({ query, page, message }) {
+function errorBlock({ query, page, message, adminLoggedIn = false, searchReason = '' }) {
   return html`
 <div class="state-card rise" role="alert">
   <div class="state-icon is-warn">${icons.alert}</div>
   <h2>Search is temporarily unavailable</h2>
   <p class="muted">${message}</p>
   <p class="actions"><a class="btn btn-primary" href="${searchHref(query, { page })}">Try again</a><a class="btn btn-ghost" href="/">Back to start</a></p>
+  ${
+    adminLoggedIn && searchReason
+      ? html`<p class="muted small">Administrators: ${searchReason} — see <a href="/admin/search">Search diagnostics</a>.</p>`
+      : ''
+  }
 </div>`;
 }
 
@@ -111,7 +116,7 @@ function unconfiguredBlock({ query, quickLinks, adminLoggedIn, searchReason = ''
   ${quickLinksBlock(quickLinks)}
   ${
     adminLoggedIn
-      ? html`<p class="muted small">Administrators: set <code>SEARCH_PROVIDER</code> and <code>SEARCH_PROVIDER_URL</code> to connect a search backend.${searchReason ? html` Currently: ${searchReason}` : ''}</p>`
+      ? html`<p class="muted small">Administrators: set <code>SEARCH_PROVIDER=bing</code> to switch web search on — it needs no account and no API key. Other backends are listed on the <a href="/admin/search">Search diagnostics</a> page.${searchReason ? html` Currently: ${searchReason}` : ''}</p>`
       : ''
   }
 </div>`;
