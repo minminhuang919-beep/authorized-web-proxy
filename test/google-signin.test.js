@@ -1,23 +1,35 @@
 /**
  * "Sign in with Google" on a proxied page.
  *
- * THE BUG THIS PINS DOWN. GeoGuessr loads Google Identity Services at runtime
+ * WHAT THE SITE DOES. GeoGuessr loads Google Identity Services at runtime
  * (`document.createElement('script').src = 'https://accounts.google.com/gsi/client'`)
  * and, once it has loaded, calls `google.accounts.id.renderButton()` into an
- * empty `<div id="googleSignIn">`. Through the proxy that script URL was
- * rewritten to `/p/https/accounts.google.com/gsi/client`, which the proxy
- * answered with its HTML "Sign-in required" page. HTML is not JavaScript: the
- * script failed, its `load` event never fired, `renderButton()` was never
- * reached, the div stayed empty — and the site's own "Continue with Google"
- * artwork sat on top of nothing. Clicking it did nothing at all. Apple was
- * unaffected because GeoGuessr signs in with Apple by navigating the whole
- * page to `appleid.apple.com`, which the proxy hands off properly.
+ * empty `<div id="googleSignIn">`. That is the credential (ID token) flow, and
+ * its UX is a popup Google itself opens from inside its own iframe — nothing
+ * navigates. Apple is different: GeoGuessr signs in with Apple by navigating
+ * the whole page to `appleid.apple.com`, which the server hand-off handles.
  *
- * Google sign-in genuinely cannot run on a proxied origin: GIS checks
- * `window.location.origin` against the Authorized JavaScript origins of the
- * site's OAuth client, and neither forging that origin nor editing someone
- * else's OAuth client is acceptable. So the SDK is never fetched, a stand-in
- * renders a working control, and clicking it hands off to the real site.
+ * WHY IT CANNOT RUN HERE. Before GIS renders a button or opens anything, it
+ * asks `accounts.google.com/gsi/status` whether `window.location.origin` is an
+ * Authorized JavaScript origin of the site's OAuth client. Measured against
+ * GeoGuessr's own public client id: `https://www.geoguessr.com` gets HTTP 200,
+ * `https://anonview-proxy.onrender.com` gets HTTP 403. Neither forging that
+ * origin nor editing a third party's OAuth client is acceptable, so the answer
+ * is no and no popup can exist.
+ *
+ * WHAT THE PROXY DOES ABOUT IT. Two paths, and only two:
+ *
+ *   * `PROXY_AUTH_FLOW_HOSTS` names the host (the operator runs the app and
+ *     registered this origin with the provider): the SDK is left completely
+ *     alone, loads from Google unproxied, and Google's own popup UX runs with
+ *     the site's own client id, state and nonce. The parent page stays open.
+ *     A provider window the site opens itself is passed through untouched and
+ *     watched for blocking and for closing.
+ *
+ *   * Anyone else's site: the SDK is never fetched, the control says
+ *     "Google sign-in isn't available inside this proxy", and *nothing is
+ *     opened* — no provider window, and no second copy of the site the visitor
+ *     is already on. The page they are on stays exactly where it is.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -73,113 +85,153 @@ describe('the Google sign-in button on a proxied page', () => {
     assert.equal(container.childNodes.length, 1);
   });
 
-  // (1) Google sign-in button click
-  test('clicking it explains the situation instead of doing nothing', () => {
+  // (1) Click Google sign-in, (2) the parent stays put, (3) no second tab
+  test('clicking it keeps the proxied page open and opens nothing at all', () => {
     const dom = createDom();
     loadGisLikeGeoGuessr(dom);
     const container = dom.document.getElementById('googleSignIn');
+    const before = dom.window.location.href;
     dom.window.google.accounts.id.renderButton(container, {});
 
     assert.equal(dom.panel(), null, 'nothing on screen until the visitor asks for it');
     container.childNodes[0].click();
 
     const panel = dom.panel();
-    assert.ok(panel, 'the hand-off panel appears');
-    const text = panel.text();
-    assert.match(text, /Sign-in required/);
-    assert.match(text, /Google sign-in has to run on www\.geoguessr\.com itself/);
-    assert.match(text, /checks the website address/);
-    assert.match(text, /You will stay signed out on this proxied page/, 'no pretence that sign-in succeeded');
-    assert.ok(findButton(panel, 'Continue on www\\.geoguessr\\.com'), 'the direct-login action');
-    assert.ok(findButton(panel, 'Cancel'));
+    assert.ok(panel, 'the explanation appears on the page the visitor is already on');
+    assert.match(panel.text(), /Google sign-in isn’t available inside this proxy/);
+    assert.match(panel.text(), /only accepts a sign-in that starts from www\.geoguessr\.com’s own web address/);
+    assert.match(panel.text(), /You stay on this page, and stay signed out on it/);
+
+    // (3) nothing is opened: no provider window, and above all no second copy
+    // of the site the visitor is already looking at
+    assert.deepEqual(dom.opened, [], 'no window of any kind');
+    assert.equal(
+      panel.all().some((n) => n.tagName === 'A'),
+      false,
+      'not even a link that would take them off this page'
+    );
+    // (2) the parent page is untouched
+    assert.equal(dom.window.location.href, before);
+
+    const labels = panel.all().filter((n) => n.tagName === 'BUTTON').map((n) => n.textContent);
+    assert.deepEqual(labels, ['Try again', 'Close'], 'a retry, and a way out');
   });
 
-  // (3) popup opened
-  test('the popup opens the real site, and only the real site', () => {
+  test('Try again shows a loading state and then the same honest answer', () => {
     const dom = createDom();
     dom.auth.sdkBlocked('Google');
-    const container = dom.document.createElement('div');
-    dom.document.body.appendChild(container);
-    dom.window.google.accounts.id.renderButton(container, {});
-    container.childNodes[0].click();
-    findButton(dom.panel(), 'Continue on').click();
+    dom.auth.unavailable('Google');
+    findButton(dom.panel(), 'Try again').click();
 
-    assert.deepEqual(dom.opened, [{ url: 'https://www.geoguessr.com/', target: '_blank', features: 'noopener,noreferrer' }]);
-    assert.equal(dom.panel(), null, 'the panel closes once the window is open');
+    assert.match(dom.panel().text(), /Checking…/, 'a loading state on the parent page');
+    assert.match(dom.panel().text(), /Asking Google whether this address may start a sign-in/);
+    dom.runTimers();
+    assert.match(dom.panel().text(), /Google sign-in isn’t available inside this proxy/);
+    assert.deepEqual(dom.opened, [], 'retrying still opens nothing');
+
+    findButton(dom.panel(), 'Close').click();
+    assert.equal(dom.panel(), null);
   });
 
-  // (2) popup blocked, and (7) no popup loops
-  test('a blocked popup says so and offers a link, without ever retrying by itself', () => {
-    const dom = createDom({ popup: null });
-    dom.auth.sdkBlocked('Google');
-    const container = dom.document.createElement('div');
-    dom.document.body.appendChild(container);
-    dom.window.google.accounts.id.renderButton(container, {});
-    container.childNodes[0].click();
-    const go = findButton(dom.panel(), 'Continue on');
-    go.click();
+  // (4) the legitimate popup, only where the origin is actually registered
+  test('where the operator registered this origin, the provider SDK is left alone', () => {
+    const dom = createDom({ authFlowHost: true });
+    const script = dom.document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    assert.equal(script.src, 'https://accounts.google.com/gsi/client', 'loaded from Google, unproxied and unmodified');
+    assert.equal(dom.window.google, undefined, 'no stand-in is installed: the real library runs');
+    assert.equal(dom.auth.supported, true);
+  });
+
+  test("a provider sign-in window is the provider's own, never a proxied copy", () => {
+    const popup = { closed: false, focused: 0, focus() { this.focused++; }, close() { this.closed = true; } };
+    const dom = createDom({ authFlowHost: true, popup });
+    const url = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=SITE-OWN-CLIENT&response_type=code&state=SITE-OWN-STATE&nonce=SITE-OWN-NONCE';
+    dom.window.open(url);
+
+    assert.equal(dom.opened.length, 1);
+    assert.equal(dom.opened[0].url, url, 'the URL is passed through byte for byte: client id, state and nonce untouched');
+    assert.doesNotMatch(dom.opened[0].url, /\/p\//, 'never a proxied copy of the provider');
+    assert.match(dom.opened[0].features, /popup=1/, 'a popup, not a tab');
+    assert.equal(popup.focused, 1, 'the popup is focused');
+    assert.match(dom.panel().text(), /Waiting for Google…/, 'and the parent page shows a loading state');
+    assert.match(dom.panel().text(), /This page stays open/);
+  });
+
+  // (6) popup closed
+  test('a popup that closes without a session says so instead of guessing', () => {
+    const popup = { closed: false, focus() {}, close() { this.closed = true; } };
+    const dom = createDom({ authFlowHost: true, popup });
+    dom.window.open('https://accounts.google.com/o/oauth2/v2/auth?client_id=x');
+    assert.equal(dom.intervalCount, 1, 'the popup is being watched');
+
+    dom.tick();
+    assert.match(dom.panel().text(), /Waiting for Google/, 'still open, still waiting');
+
+    popup.closed = true;
+    dom.tick();
+    assert.match(dom.panel().text(), /Sign-in window was closed/);
+    assert.match(dom.panel().text(), /before this page reported a signed-in session/);
+    assert.equal(dom.intervalCount, 0, 'the watcher stops');
+    assert.ok(findButton(dom.panel(), 'Try again'));
+    assert.equal(dom.opened.length, 1, 'and nothing was reopened on its own');
+  });
+
+  // (5) popup blocked
+  test('a blocked popup says so and offers a retry, and never opens a site tab', () => {
+    const dom = createDom({ authFlowHost: true, popup: null });
+    dom.window.open('https://accounts.google.com/o/oauth2/v2/auth?client_id=x');
 
     const panel = dom.panel();
-    assert.ok(panel, 'the panel stays open to explain');
     assert.match(panel.text(), /Sign-in window was blocked/);
-    assert.match(panel.text(), /browser stopped the sign-in window/);
-    const link = panel.all().find((n) => n.tagName === 'A');
-    assert.ok(link, 'a link the visitor clicks themselves, which a popup blocker allows');
-    assert.equal(link.getAttribute('href'), 'https://www.geoguessr.com/');
-    assert.equal(link.getAttribute('target'), '_blank');
-    assert.equal(link.getAttribute('rel'), 'noopener noreferrer nofollow');
-    assert.equal(link.getAttribute('referrerpolicy'), 'no-referrer');
+    assert.match(panel.text(), /Allow pop-ups for this page/);
+    assert.ok(findButton(panel, 'Try again'));
+    assert.equal(
+      panel.all().some((n) => n.tagName === 'A'),
+      false,
+      'no link that would open the website instead'
+    );
+    assert.equal(dom.opened.length, 1, 'one attempt; the proxy does not retry by itself');
 
-    // the proxy never opens another window on its own
-    go.click();
-    go.click();
-    assert.equal(dom.opened.length, 1, 'one window attempt per gesture: no popup loop');
+    findButton(dom.panel(), 'Try again').click();
+    assert.equal(dom.opened.length, 2, 'a retry is the visitor asking, once');
+    assert.match(dom.panel().text(), /Sign-in window was blocked/);
   });
 
-  // (4) direct-auth fallback
-  test('the direct-login URL is the site itself, with no query string and no OAuth parameters', () => {
-    const dom = createDom({
-      proxyUrl: 'http://proxy.test/p/https/www.geoguessr.com/signin?next=%2Fmaps&state=SHOULD-NOT-TRAVEL',
-      pageUrl: 'https://www.geoguessr.com/signin?next=%2Fmaps&state=SHOULD-NOT-TRAVEL'
-    });
-    assert.equal(dom.auth.directSiteUrl(), 'https://www.geoguessr.com/signin', 'origin and path only');
+  // (7) OAuth failure behaviour on a site whose client does not know this origin
+  test('on somebody else\'s site a provider window is refused with the explanation, not opened', () => {
+    const dom = createDom({ authFlowHost: false });
+    const result = dom.window.open('https://accounts.google.com/o/oauth2/v2/auth?client_id=x&response_type=code');
 
-    dom.auth.handoff('Google');
-    const panel = dom.panel();
-    findButton(panel, 'Continue on').click();
-    assert.equal(dom.opened[0].url, 'https://www.geoguessr.com/signin');
-    assert.doesNotMatch(JSON.stringify(dom.opened), /SHOULD-NOT-TRAVEL|next=/);
-    assert.doesNotMatch(panel.text() + JSON.stringify(dom.opened), /client_id|accounts\.google\.com|apps\.googleusercontent/);
+    assert.equal(result, null);
+    assert.deepEqual(dom.opened, [], 'no provider window, because it could only show an origin error');
+    assert.match(dom.panel().text(), /Google sign-in isn’t available inside this proxy/);
   });
 
-  // (10) third-party cookie / storage failure (One Tap)
-  test('One Tap reports that it cannot be displayed rather than hanging or faking a credential', () => {
-    const dom = createDom();
-    dom.auth.sdkBlocked('Google');
-    let moment = null;
-    dom.window.google.accounts.id.prompt((m) => {
-      moment = m;
-    });
-    assert.ok(moment, 'the site\'s notification listener is called');
-    assert.equal(moment.isNotDisplayed(), true);
-    assert.equal(moment.isDisplayed(), false);
-    assert.equal(typeof moment.getNotDisplayedReason(), 'string');
-    // the credential callback is never reachable, so nothing can claim a sign-in
-    assert.equal(dom.window.google.accounts.id.__pxy, true);
-    dom.window.google.accounts.id.revoke('someone@example.com', (r) => {
-      assert.equal(r.successful, false);
-    });
-  });
-
-  test('the token and code clients hand off too, instead of failing silently', () => {
+  test('the token and code clients report the same thing instead of failing silently', () => {
     const dom = createDom();
     dom.auth.sdkBlocked('Google');
     dom.window.google.accounts.oauth2.initTokenClient({ client_id: 'x', scope: 'openid' }).requestAccessToken();
-    assert.ok(dom.panel(), 'requesting a token opens the hand-off');
+    assert.match(dom.panel().text(), /isn’t available inside this proxy/);
+    assert.deepEqual(dom.opened, []);
     assert.equal(dom.window.google.accounts.oauth2.hasGrantedAllScopes(), false);
   });
 
-  // (6) ordinary page
+  // (8) nothing sensitive is ever written down on the client side either
+  test('no OAuth parameter reaches the panel, and no window is opened carrying one', () => {
+    const dom = createDom({
+      proxyUrl: 'http://proxy.test/p/https/www.geoguessr.com/signin?state=SECRET-STATE&code=SECRET-CODE',
+      pageUrl: 'https://www.geoguessr.com/signin?state=SECRET-STATE&code=SECRET-CODE'
+    });
+    dom.auth.sdkBlocked('Google');
+    dom.auth.unavailable('Google');
+    const text = dom.panel().text() + JSON.stringify(dom.opened);
+    for (const secret of ['SECRET-STATE', 'SECRET-CODE', 'client_id', 'apps.googleusercontent']) {
+      assert.ok(!text.includes(secret), `"${secret}" must never appear`);
+    }
+  });
+
+  // ordinary pages are unaffected
   test('ordinary scripts and pages are untouched by any of this', () => {
     const dom = createDom();
     const ordinary = dom.document.createElement('script');
@@ -198,7 +250,7 @@ describe('the Google sign-in button on a proxied page', () => {
     assert.equal(dom.opened.length, 0);
   });
 
-  // (7) Apple behaviour on the client side
+  // Apple behaviour on the client side
   test("Apple's SDK is intercepted the same way, and its redirect flow is left to the server", () => {
     const dom = createDom();
     const appleSdk = dom.document.createElement('script');

@@ -302,33 +302,92 @@
   var origOpenWin = w.open;
   w.open = function (url) {
     var args = Array.prototype.slice.call(arguments);
-    if (url !== undefined && url !== null) args[0] = rewrite(String(url));
+    if (url === undefined || url === null) return origOpenWin.apply(this, args);
+    var raw = String(url);
+    // A window onto a provider's sign-in UI is not a web page to proxy. Left
+    // to `rewrite()` it would become a *proxied* copy of the provider, which
+    // is both useless and exactly the second tab we must never create.
+    var provider = providerWindow(raw);
+    if (provider) {
+      // Only where the operator registered this proxy's origin with the
+      // provider can that window succeed. Anywhere else it would just show
+      // the provider's own origin error, so say what is actually wrong.
+      if (!authFlowHost) {
+        showUnavailable(provider.name);
+        return null;
+      }
+      return openProviderPopup(provider.url, provider.name);
+    }
+    args[0] = rewrite(raw);
     return origOpenWin.apply(this, args);
   };
+
+  /** Is this `window.open` call a provider sign-in window? */
+  function providerWindow(raw) {
+    var u;
+    try {
+      u = new URL(raw.indexOf(PREFIX) === 0 ? fromProxyPath(raw) || raw : raw, currentPageUrl());
+    } catch (e) {
+      return null;
+    }
+    if ((u.protocol !== 'http:' && u.protocol !== 'https:') || !isProviderHost(u.hostname)) return null;
+    return { url: u.href, name: u.hostname.indexOf('google') !== -1 ? 'Google' : u.hostname.indexOf('apple') !== -1 ? 'Apple' : u.hostname };
+  }
 
   // --- Third-party sign-in SDKs -------------------------------------------
   //
   // A "Sign in with Google/Apple/..." SDK is bound to the application's own
-  // origin: Google Identity Services checks `window.location.origin` against
-  // the Authorized JavaScript origins registered for that site's OAuth client.
-  // A proxied page is served from this proxy's origin, so the SDK refuses to
-  // work. We never fake that origin, and we never touch anyone else's OAuth
-  // configuration.
+  // origin. Google Identity Services asks `accounts.google.com/gsi/status`
+  // whether `window.location.origin` is an Authorized JavaScript origin of the
+  // site's OAuth client *before* it will render a button or open its popup; an
+  // origin that is not registered gets HTTP 403 and the flow stops there. A
+  // proxied page is served from the proxy's origin, so for somebody else's
+  // site that answer is always no. We never forge an origin, never touch
+  // anyone else's OAuth client, and never build an authorization request of
+  // our own.
   //
-  // What used to happen: the SDK's URL was rewritten into the proxy, the proxy
-  // answered the <script> with its HTML "Sign-in required" page, the script
-  // failed to parse, its `onload` never fired, and the site therefore never
-  // called `renderButton()`. The sign-in control stayed an empty <div> and
-  // clicking it did nothing at all.
+  // Two outcomes, and only two:
   //
-  // What happens now: the SDK is never fetched. A minimal stand-in is
-  // installed so the page's own bookkeeping still runs, and the control it
-  // renders explains the situation and offers to open the real site in the
-  // visitor's own browser. No credential is ever produced, and the site's
-  // callback is never invoked, so the page can never believe someone signed in.
+  //   * The operator runs this application and has registered the proxy's
+  //     origin with the provider (`PROXY_AUTH_FLOW_HOSTS`, `cfg.authFlowHost`).
+  //     Then the SDK is left completely alone: it loads from the provider,
+  //     exactly as it would on the real site, and Google's own popup UX runs
+  //     with the site's own client id, redirect URI, state and nonce. The
+  //     proxied page stays open underneath, which is what that UX is for.
+  //
+  //   * Anyone else's site. The SDK is never fetched, because it cannot work;
+  //     the sign-in control says so and the page stays exactly where it is.
+  //     Nothing is opened: no provider window, and above all no second copy
+  //     of the site the visitor is already on.
 
   var EMPTY_SCRIPT = 'data:text/javascript,';
+  var authFlowHost = cfg.authFlowHost === true;
   var blockedSdks = {};
+
+  /** Hosts whose windows are the provider's own sign-in UI, never a website. */
+  function isProviderHost(host) {
+    host = String(host || '').toLowerCase();
+    var exact = [
+      'accounts.google.com',
+      'accounts.youtube.com',
+      'oauth2.googleapis.com',
+      'appleid.apple.com',
+      'idmsa.apple.com',
+      'login.microsoftonline.com',
+      'login.live.com',
+      'www.facebook.com',
+      'm.facebook.com',
+      'github.com',
+      'id.twitch.tv',
+      'auth.atlassian.com'
+    ];
+    if (exact.indexOf(host) !== -1) return true;
+    var suffixes = ['.auth0.com', '.okta.com', '.b2clogin.com', '.ciamlogin.com', '.onelogin.com'];
+    for (var i = 0; i < suffixes.length; i++) {
+      if (host.length > suffixes[i].length && host.slice(-suffixes[i].length) === suffixes[i]) return true;
+    }
+    return false;
+  }
 
   function matchAuthSdk(u) {
     var host = u.hostname.toLowerCase();
@@ -349,16 +408,23 @@
   function rewriteScriptSrc(value, el) {
     if (el && isOwn(el)) return value;
     var provider = '';
+    var target = null;
     try {
-      var s = String(value == null ? '' : value).trim();
+      var str = String(value == null ? '' : value).trim();
       // Only an http(s) URL can be an SDK. Relative and protocol-relative
       // forms resolve against the page; data:, blob: and javascript: cannot.
-      var absolute = s.indexOf(PREFIX) === 0 ? fromProxyPath(s) : SCHEME_RE.test(s) && !/^https?:/i.test(s) ? '' : s;
-      if (absolute) provider = matchAuthSdk(new URL(absolute, currentPageUrl()));
+      var absolute = str.indexOf(PREFIX) === 0 ? fromProxyPath(str) : SCHEME_RE.test(str) && !/^https?:/i.test(str) ? '' : str;
+      if (absolute) {
+        target = new URL(absolute, currentPageUrl());
+        provider = matchAuthSdk(target);
+      }
     } catch (e) {
       provider = '';
     }
     if (!provider) return rewrite(value);
+    // The operator vouched for this host, so the provider's own SDK is what
+    // should run: load it from the provider, unproxied, and stay out of it.
+    if (authFlowHost) return target.href;
     sdkBlocked(provider);
     // An empty script: it loads instantly, so the page's `onload` handler runs
     // exactly as it would have, and nothing is requested from the provider.
@@ -376,7 +442,8 @@
   /**
    * The smallest usable stand-in for Google Identity Services. It stores no
    * client id, produces no credential and never calls the site's callback --
-   * `renderButton` simply draws a control that hands off to the real site.
+   * `renderButton` simply draws a control that explains why sign-in cannot
+   * run here. Nothing it does could make the page believe someone signed in.
    */
   function installGoogleIdentity() {
     var g = (w.google = w.google || {});
@@ -392,8 +459,7 @@
       isNotDisplayed: function () {
         return true;
       },
-      // The same reason a real browser reports when One Tap cannot run:
-      // the origin is not one the client is configured for.
+      // The same reason a real browser reports when One Tap cannot run.
       getNotDisplayedReason: function () {
         return 'opt_out_or_no_session';
       },
@@ -408,7 +474,7 @@
       __pxy: true,
       initialize: function () {},
       renderButton: function (parent, options) {
-        renderHandoffButton(parent, 'Google', options);
+        renderSignInButton(parent, 'Google', options);
       },
       prompt: function (listener) {
         if (typeof listener === 'function') {
@@ -428,19 +494,18 @@
         if (typeof done === 'function') done({ successful: false, error: 'proxied origin' });
       }
     };
-    // The authorization-code / access-token clients hand off the same way.
     g.accounts.oauth2 = g.accounts.oauth2 || {
       initTokenClient: function () {
         return {
           requestAccessToken: function () {
-            openHandoff('Google');
+            showUnavailable('Google');
           }
         };
       },
       initCodeClient: function () {
         return {
           requestCode: function () {
-            openHandoff('Google');
+            showUnavailable('Google');
           }
         };
       },
@@ -456,11 +521,10 @@
     };
   }
 
-  /** The site's own container, filled with a control that actually does something. */
-  function renderHandoffButton(parent, provider, options) {
+  /** The site's own container, filled with a control that says what it does. */
+  function renderSignInButton(parent, provider, options) {
     if (!parent || parent.nodeType !== 1) return;
-    var existing = parent.querySelector('[data-pxy-auth-button]');
-    if (existing) return;
+    if (parent.querySelector('[data-pxy-auth-button]')) return;
     var width = options && options.width ? String(options.width).replace(/[^0-9]/g, '') : '';
     var btn = document.createElement('button');
     btn.setAttribute('type', 'button');
@@ -475,7 +539,7 @@
     btn.addEventListener('click', function (ev) {
       ev.preventDefault();
       ev.stopPropagation();
-      openHandoff(provider);
+      showUnavailable(provider);
     });
     parent.appendChild(btn);
   }
@@ -491,13 +555,17 @@
     }
   }
 
+  // --- the panel ----------------------------------------------------------
   var panelEl = null;
-  var opening = false;
+  var watcher = null;
 
   function closePanel() {
+    if (watcher) {
+      clearInterval(watcher);
+      watcher = null;
+    }
     if (panelEl && panelEl.parentNode) panelEl.parentNode.removeChild(panelEl);
     panelEl = null;
-    opening = false;
   }
 
   function el(tag, css, text) {
@@ -508,146 +576,181 @@
     return node;
   }
 
-  /**
-   * Explain, then hand off. One window per click: `opening` blocks a second
-   * attempt while one is in flight, so a blocked popup can never turn into a
-   * loop of popup attempts.
-   */
-  function openHandoff(provider) {
-    var site = directSiteUrl();
-    var host = '';
-    try {
-      host = new URL(site).hostname;
-    } catch (e) {
-      host = 'the original website';
-    }
+  var CARD_CSS =
+    'all:initial;box-sizing:border-box;max-width:440px;width:calc(100% - 32px);padding:24px;border-radius:14px;' +
+    'background:#121820;color:#e6edf3;box-shadow:0 18px 48px rgba(0,0,0,.55);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;text-align:left;';
+  var TITLE_CSS = 'all:initial;display:block;font:600 18px/1.3 inherit;color:#fff;margin:0 0 10px;';
+  var BODY_CSS = 'all:initial;display:block;font:inherit;color:#9fb0c0;margin:0 0 18px;';
+  var ROW_CSS = 'all:initial;display:flex;flex-wrap:wrap;gap:10px;font:inherit;';
+  var PRIMARY_CSS =
+    'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
+    'border-radius:10px;background:#4cc2ff;color:#04121c;font:600 14px/1 inherit;cursor:pointer;';
+  var GHOST_CSS =
+    'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
+    'border-radius:10px;border:1px solid #2b3a48;color:#9fb0c0;font:500 14px/1 inherit;cursor:pointer;';
+
+  /** Open (or reuse) the overlay and return the card to draw into. */
+  function openPanel() {
     closePanel();
     panelEl = el(
       'div',
       'all:initial;position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
         'background:rgba(4,8,12,.72);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;'
     );
-    var card = el(
-      'div',
-      'all:initial;box-sizing:border-box;max-width:440px;width:calc(100% - 32px);padding:24px;border-radius:14px;' +
-        'background:#121820;color:#e6edf3;box-shadow:0 18px 48px rgba(0,0,0,.55);font:inherit;text-align:left;'
-    );
-    var title = el('h2', 'all:initial;display:block;font:600 18px/1.3 inherit;color:#fff;margin:0 0 10px;', 'Sign-in required');
-    var body = el(
-      'p',
-      'all:initial;display:block;font:inherit;color:#9fb0c0;margin:0 0 18px;',
-      provider +
-        ' sign-in has to run on ' +
-        host +
-        ' itself. ' +
-        provider +
-        ' checks the website address it was opened from, and this page is being served through the proxy, so it will not accept a sign-in started here.'
-    );
-    var actions = el('div', 'all:initial;display:flex;flex-wrap:wrap;gap:10px;font:inherit;');
-    var note = el('p', 'all:initial;display:block;font:400 12px/1.5 inherit;color:#7d8d9c;margin:16px 0 0;', 'You will stay signed out on this proxied page.');
-
-    var go = el(
-      'button',
-      'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
-        'border-radius:10px;background:#4cc2ff;color:#04121c;font:600 14px/1 inherit;cursor:pointer;'
-    );
-    go.setAttribute('type', 'button');
-    go.textContent = site ? 'Continue on ' + host : 'Continue on the original website';
-
-    var cancel = el(
-      'button',
-      'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
-        'border-radius:10px;border:1px solid #2b3a48;color:#9fb0c0;font:500 14px/1 inherit;cursor:pointer;'
-    );
-    cancel.setAttribute('type', 'button');
-    cancel.textContent = 'Cancel';
-    cancel.addEventListener('click', closePanel);
-
-    go.addEventListener('click', function () {
-      if (opening || !site) return;
-      opening = true;
-      var win = null;
-      try {
-        win = origOpenWin.call(w, site, '_blank', 'noopener,noreferrer');
-      } catch (e) {
-        win = null;
-      }
-      if (win) {
-        closePanel();
-        return;
-      }
-      // The browser refused the window. Do not try again on our own: offer a
-      // link the visitor clicks themselves, which a popup blocker allows.
-      showBlocked(card, site, host);
-    });
-
-    actions.appendChild(go);
-    actions.appendChild(cancel);
-    card.appendChild(title);
-    card.appendChild(body);
-    card.appendChild(actions);
-    card.appendChild(note);
+    var card = el('div', CARD_CSS);
     panelEl.appendChild(card);
     panelEl.addEventListener('click', function (ev) {
       if (ev.target === panelEl) closePanel();
     });
     (document.body || document.documentElement).appendChild(panelEl);
-    try {
-      go.focus();
-    } catch (e) {
-      /* focus is a nicety */
-    }
+    return card;
   }
 
-  /** Popup blocked: say so, and give the visitor a link to click themselves. */
-  function showBlocked(card, site, host) {
+  function button(label, css, onClick) {
+    var b = el('button', css, label);
+    b.setAttribute('type', 'button');
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function fill(card, title, body, buttons) {
     while (card.firstChild) card.removeChild(card.firstChild);
-    card.appendChild(el('h2', 'all:initial;display:block;font:600 18px/1.3 inherit;color:#fff;margin:0 0 10px;', 'Sign-in window was blocked'));
+    card.appendChild(el('h2', TITLE_CSS, title));
+    card.appendChild(el('p', BODY_CSS, body));
+    var row = el('div', ROW_CSS);
+    for (var i = 0; i < buttons.length; i++) row.appendChild(buttons[i]);
+    card.appendChild(row);
+    return card;
+  }
+
+  /**
+   * The only answer available for somebody else's site. The proxied page is
+   * left exactly as it was: no provider window, and no second copy of the
+   * site the visitor is already looking at.
+   */
+  function showUnavailable(provider, detail) {
+    var name = provider || 'Google';
+    var host = '';
+    try {
+      host = new URL(directSiteUrl()).hostname;
+    } catch (e) {
+      host = 'this website';
+    }
+    var card = openPanel();
+    fill(
+      card,
+      name + ' sign-in isn’t available inside this proxy',
+      detail ||
+        name +
+          ' only accepts a sign-in that starts from ' +
+          host +
+          '’s own web address. This page is being served through the proxy, so ' +
+          name +
+          ' refuses the request before any sign-in window can open. Nothing can be done about that from here without impersonating ' +
+          host +
+          ', which this proxy will not do.',
+      [
+        button('Try again', PRIMARY_CSS, function () {
+          retry(name);
+        }),
+        button('Close', GHOST_CSS, closePanel)
+      ]
+    );
     card.appendChild(
       el(
         'p',
-        'all:initial;display:block;font:inherit;color:#9fb0c0;margin:0 0 18px;',
-        'Your browser stopped the sign-in window from opening. Use the link below to open ' + host + ' yourself.'
+        'all:initial;display:block;font:400 12px/1.5 inherit;color:#7d8d9c;margin:16px 0 0;',
+        'You stay on this page, and stay signed out on it. To use your account, open ' + host + ' yourself in a new tab.'
       )
     );
-    var row = el('div', 'all:initial;display:flex;flex-wrap:wrap;gap:10px;font:inherit;');
-    var link = document.createElement('a');
-    link.setAttribute('data-pxy-ignore', '1');
-    link.setAttribute('href', site);
-    link.setAttribute('target', '_blank');
-    link.setAttribute('rel', 'noopener noreferrer nofollow');
-    link.setAttribute('referrerpolicy', 'no-referrer');
-    link.textContent = 'Open ' + host;
-    link.style.cssText =
-      'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
-      'border-radius:10px;background:#4cc2ff;color:#04121c;font:600 14px/1 inherit;cursor:pointer;';
-    link.addEventListener('click', function () {
-      setTimeout(closePanel, 0);
-    });
-    var dismiss = el(
-      'button',
-      'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
-        'border-radius:10px;border:1px solid #2b3a48;color:#9fb0c0;font:500 14px/1 inherit;cursor:pointer;'
-    );
-    dismiss.setAttribute('type', 'button');
-    dismiss.textContent = 'Close';
-    dismiss.addEventListener('click', closePanel);
-    row.appendChild(link);
-    row.appendChild(dismiss);
-    card.appendChild(row);
-    // `opening` deliberately stays set: once the browser has refused a window,
-    // this panel never asks for another one. Only closing it (or a fresh click
-    // on the site's sign-in control) allows a new attempt, so a blocked popup
-    // can never become a loop of popup attempts.
   }
 
-  // The proxy serves this same entry point in place of a sign-in SDK that was
-  // requested as a <script> without the shim having caught it first.
+  /** Re-check, with a visible loading state, then report the same answer. */
+  function retry(provider) {
+    var card = openPanel();
+    fill(card, 'Checking…', 'Asking ' + provider + ' whether this address may start a sign-in.', [button('Cancel', GHOST_CSS, closePanel)]);
+    setTimeout(function () {
+      if (!panelEl) return;
+      showUnavailable(provider);
+    }, 600);
+  }
+
+  /**
+   * A provider sign-in window, for a host the operator vouched for. Only ever
+   * the provider's own URL, never proxied, with the parent page left open
+   * behind it -- that is the whole point of the popup UX.
+   */
+  function openProviderPopup(url, provider) {
+    var name = provider || 'Google';
+    var win = null;
+    try {
+      win = origOpenWin.call(w, url, 'pxy_signin', 'popup=1,width=500,height=640');
+    } catch (e) {
+      win = null;
+    }
+    if (!win) {
+      var blocked = openPanel();
+      fill(blocked, 'Sign-in window was blocked', 'Your browser stopped the ' + name + ' sign-in window from opening. Allow pop-ups for this page, then try again.', [
+        button('Try again', PRIMARY_CSS, function () {
+          closePanel();
+          openProviderPopup(url, name);
+        }),
+        button('Close', GHOST_CSS, closePanel)
+      ]);
+      return null;
+    }
+    try {
+      win.focus();
+    } catch (e) {
+      /* focus is a nicety */
+    }
+    var card = openPanel();
+    fill(card, 'Waiting for ' + name + '…', 'Finish signing in in the ' + name + ' window. This page stays open and will pick up from where it is.', [
+      button('Cancel', GHOST_CSS, function () {
+        closePanel();
+        try {
+          win.close();
+        } catch (e) {
+          /* the window is the provider's; it may refuse */
+        }
+      })
+    ]);
+    watcher = setInterval(function () {
+      var closed = false;
+      try {
+        closed = win.closed;
+      } catch (e) {
+        closed = false;
+      }
+      if (!closed) return;
+      clearInterval(watcher);
+      watcher = null;
+      if (!panelEl) return;
+      // The window went away without the page reporting a session. Say so
+      // plainly rather than guessing that it worked.
+      fill(
+        panelEl.firstChild,
+        'Sign-in window was closed',
+        'The ' + name + ' window closed before this page reported a signed-in session. If you did sign in, reload the page; otherwise try again.',
+        [
+          button('Try again', PRIMARY_CSS, function () {
+            closePanel();
+            openProviderPopup(url, name);
+          }),
+          button('Close', GHOST_CSS, closePanel)
+        ]
+      );
+    }, 500);
+    return win;
+  }
+
   w.__PXY_AUTH__ = {
     sdkBlocked: sdkBlocked,
-    handoff: openHandoff,
+    unavailable: showUnavailable,
+    popup: openProviderPopup,
     directSiteUrl: directSiteUrl,
-    blocked: blockedSdks
+    blocked: blockedSdks,
+    supported: authFlowHost
   };
 
   // --- Catch-all: observe the DOM for anything the patches above missed ----

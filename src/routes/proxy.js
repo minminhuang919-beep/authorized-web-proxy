@@ -46,7 +46,17 @@ export default async function proxyRoutes(app) {
   };
 
   const headHtml = (target) => {
-    const cfg = { pageUrl: target.href, prefix: '/p/', mode: config.unlistedUrlMode, allowed: allowlist.patterns() };
+    const cfg = {
+      pageUrl: target.href,
+      prefix: '/p/',
+      mode: config.unlistedUrlMode,
+      allowed: allowlist.patterns(),
+      // The operator runs this application and has registered this proxy's
+      // origin and redirect URI with the identity provider themselves
+      // (PROXY_AUTH_FLOW_HOSTS). Only then can a provider's own sign-in SDK
+      // and its popup UX work here, so only then does the shim leave them be.
+      authFlowHost: authFlowExemptions.isExempt(target.hostname)
+    };
     return `<script>window.__PXY__=${safeJsonForScript(cfg)};</script><script src="/_/shim.js"></script>`;
   };
 

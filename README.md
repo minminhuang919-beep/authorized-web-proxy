@@ -549,27 +549,55 @@ script failed to parse, its `load` event never fired, `renderButton()` was
 therefore never called, and the site's sign-in control stayed an empty `<div>`.
 Clicking it did nothing whatsoever.
 
-So `src/public/shim.js` handles these SDKs itself:
+**Is the origin registered?** Google answers that itself, and it is worth
+checking before assuming. GIS asks `accounts.google.com/gsi/status` whether the
+page's origin is an Authorized JavaScript origin of the client, *before* it
+renders a button or opens anything:
 
-* a known sign-in SDK URL (`accounts.google.com/gsi/*`,
-  `apis.google.com/js/platform.js`, `appleid.cdn-apple.com/appleauth/static/jsapi/*`,
-  `connect.facebook.net/*/sdk.js`) is **never fetched** — from Google or
-  through the proxy. The `src` becomes an empty `data:` script, so the page's
-  own `onload` bookkeeping runs exactly as it would have;
-* a minimal stand-in for `google.accounts.id` is installed. `renderButton()`
-  draws a real *Continue with Google* control into the site's own container,
-  `prompt()` reports `isNotDisplayed()` instead of hanging, and the token and
-  code clients hand off as well. It stores no client id, produces no
-  credential, and **never calls the site's callback** — so the page can never
-  conclude that someone signed in;
-* clicking that control opens a panel explaining that Google sign-in has to run
-  on the site's own address, with one button that opens the real site in a new
-  tab (origin and path, query string dropped).
+```bash
+CID=<the site's public client id>
+curl -s -o /dev/null -w '%{http_code}\n' -H "Origin: https://www.geoguessr.com" \
+  "https://accounts.google.com/gsi/status?client_id=$CID"     # 200
+curl -s -o /dev/null -w '%{http_code}\n' -H "Origin: https://your-proxy.example" \
+  "https://accounts.google.com/gsi/status?client_id=$CID"     # 403
+```
 
-If the browser blocks that window, the panel switches to **"Sign-in window was
-blocked"** and offers a link the visitor clicks themselves. The proxy never
-retries a blocked window on its own: one attempt per gesture, so a popup
-blocker can never turn into a loop of popup attempts.
+So `src/public/shim.js` takes one of exactly two paths.
+
+**The host is listed in `PROXY_AUTH_FLOW_HOSTS`** — you run the application and
+have registered this proxy's origin and redirect URI with the provider
+yourself. The SDK is then left completely alone: it loads from the provider,
+unproxied and unmodified, and **Google's own popup UX runs** with the site's own
+client id, redirect URI, `state` and `nonce`. The proxied page stays open
+underneath, which is the entire point of that UX. If the site opens a provider
+window itself, `window.open` passes the provider's URL through untouched
+(never a *proxied* copy of the provider), focuses it, shows a
+*Waiting for Google…* state on the parent, and watches it: closed without a
+session gives **"Sign-in window was closed"**, a refused window gives
+**"Sign-in window was blocked"**, each with **Try again**. One window per
+gesture — the proxy never reopens one by itself.
+
+**Any other site.** The SDK is never fetched, from the provider or through the
+proxy: the `src` becomes an empty `data:` script so the page's own `onload`
+bookkeeping still runs, and a minimal stand-in for `google.accounts.id` is
+installed. `renderButton()` draws a real *Continue with Google* control into
+the site's own container, `prompt()` reports `isNotDisplayed()` instead of
+hanging, and the token and code clients behave the same way. It stores no
+client id, produces no credential and **never calls the site's callback**, so
+the page can never conclude that someone signed in.
+
+Clicking that control says so, on the page the visitor is already on:
+
+> **Google sign-in isn't available inside this proxy**
+> Google only accepts a sign-in that starts from geoguessr.com's own web
+> address. […]
+> [ Try again ] [ Close ]
+
+**Nothing is opened** — no provider window, and above all no second copy of the
+site the visitor is already looking at. The proxied page stays exactly where it
+is. A proxy-authenticated Google account would not be a session on the
+destination site anyway, and this proxy will not pretend otherwise: the only
+thing that counts as being signed in is the site's own flow reporting it.
 
 Scripts that are *not* sign-in SDKs are unaffected — including other files on
 `accounts.google.com` and `apis.google.com`, which are proxied as usual.
@@ -965,8 +993,9 @@ Deploy/build output is under **Events** → the deploy → **Logs**.
 | Google shows `403 origin_mismatch`, or a site's "Sign in with …" button fails | Expected: an identity provider validates the application's own origin, which a proxy cannot satisfy without forging it. The proxy stops such flows first and shows *Sign-in required* with a **Continue to sign in** button that opens the provider directly. If you run the application and its OAuth client, see §6 and `PROXY_AUTH_FLOW_HOSTS`. |
 | *Sign-in required* on an ordinary page | Detection needs OAuth material, an authorization-request shape, an identity-provider host or an OAuth endpoint path — check whether the URL carries `client_id`/`code`/`access_token` or sits under `/oauth/…`. For an application you run yourself, list its host in `PROXY_AUTH_FLOW_HOSTS`. |
 | Signed in with the button, but the proxied site still shows me as logged out | Expected. The sign-in happened in your own browser against the provider's site; the proxy keeps its own separate cookie jar per visitor. Continue in the tab that opened, or use the site directly for anything behind the login. |
-| A site's "Sign in with Google" button appears to do nothing | It should now open the hand-off panel instead (§6). If it still does nothing, the site is using a Google SDK URL the shim does not recognise: check the browser console for a request to `accounts.google.com` and add the URL to `matchAuthSdk()` in `src/public/shim.js` and `identitySdkProvider()` in `src/security/auth-flow.js`. |
-| "Sign-in window was blocked" | Your browser's popup blocker stopped the new tab. Use the link in the panel, which counts as your own click. The proxy deliberately never retries on its own. |
+| A site's "Sign in with Google" button appears to do nothing | It should say *Google sign-in isn't available inside this proxy* instead (§6). If it still does nothing, the site uses a Google SDK URL the shim does not recognise: check the browser console for a request to `accounts.google.com` and add it to `matchAuthSdk()` in `src/public/shim.js` and `identitySdkProvider()` in `src/security/auth-flow.js`. |
+| "Google sign-in isn't available inside this proxy" | Google refuses a sign-in that starts from an origin the site has not registered, and no amount of proxy work can change that without impersonating the site. Open the site yourself in a normal tab to use your account. If the application is *yours*, register this proxy's origin with the provider and list the host in `PROXY_AUTH_FLOW_HOSTS`; the real SDK and its popup UX then run untouched. |
+| "Sign-in window was blocked" / "Sign-in window was closed" | Only on a `PROXY_AUTH_FLOW_HOSTS` host, where a real provider window is opened. Allow pop-ups and use **Try again**. The proxy never reopens a window by itself. |
 | A page looks broken | Its assets may come from an unlisted CDN (allow it) or it relies on WebSockets/service workers (unsupported). |
 | `503 The proxy is busy` | `MAX_CONCURRENT_UPSTREAM` reached — raise it or check for a slow upstream. |
 | `429 Too many requests` for a legitimate user | Raise `RATE_LIMIT`; on Render the limiter keys on `True-Client-IP`. |

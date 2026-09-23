@@ -58,16 +58,22 @@ const TAG_CLASS = {
  * @param {string} [opts.pageUrl] the upstream URL it stands for
  * @param {string[]} [opts.allowed] the authorized scope handed to the shim
  * @param {null|object} [opts.popup] what `window.open` returns (null = blocked)
+ * @param {boolean} [opts.authFlowHost] the operator registered this proxy's
+ *   origin with the provider for this host (PROXY_AUTH_FLOW_HOSTS)
  */
 export function createDom({
   proxyUrl = 'http://proxy.test/p/https/www.geoguessr.com/',
   pageUrl = 'https://www.geoguessr.com/',
   allowed = ['*'],
+  authFlowHost = false,
   popup = { closed: false }
 } = {}) {
   const location = new URL(proxyUrl);
   const opened = [];
   const listeners = new Map();
+  const timers = new Map();
+  const intervals = new Map();
+  let timerId = 0;
 
   class Node {
     constructor(tag) {
@@ -238,16 +244,28 @@ export function createDom({
     location,
     document,
     URL,
-    __PXY__: { pageUrl, prefix: '/p/', mode: 'direct', allowed },
+    __PXY__: { pageUrl, prefix: '/p/', mode: 'direct', allowed, authFlowHost },
     open(url, target, features) {
       opened.push({ url: String(url), target, features });
       return typeof popup === 'function' ? popup(String(url)) : popup;
     },
     setTimeout: (fn) => {
-      queueMicrotask(fn);
-      return 0;
+      const id = ++timerId;
+      timers.set(id, fn);
+      return id;
     },
-    clearTimeout() {},
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    // The popup watcher polls `win.closed`; tests drive it with `tick()`.
+    setInterval: (fn) => {
+      const id = ++timerId;
+      intervals.set(id, fn);
+      return id;
+    },
+    clearInterval(id) {
+      intervals.delete(id);
+    },
     history: { pushState() {}, replaceState() {} },
     navigator: {},
     // Not provided on purpose: the shim must cope without a MutationObserver.
@@ -286,7 +304,19 @@ export function createDom({
     panel() {
       return document.body.childNodes.find((n) => n.getAttribute('data-pxy-ignore') === '1' && n.tagName === 'DIV') || null;
     },
-    /** Run pending timeouts queued by the shim. */
+    /** Run every pending `setTimeout` the shim queued. */
+    runTimers() {
+      const pending = [...timers.entries()];
+      timers.clear();
+      for (const [, fn] of pending) fn();
+    },
+    /** One turn of every `setInterval` the shim is polling with. */
+    tick() {
+      for (const [, fn] of [...intervals.entries()]) fn();
+    },
+    get intervalCount() {
+      return intervals.size;
+    },
     async flush() {
       await new Promise((r) => setImmediate(r));
     }
