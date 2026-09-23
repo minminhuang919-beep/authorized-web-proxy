@@ -98,8 +98,8 @@ describe('the Google sign-in button on a proxied page', () => {
 
     const panel = dom.panel();
     assert.ok(panel, 'the explanation appears on the page the visitor is already on');
-    assert.match(panel.text(), /Google sign-in isn’t available inside this proxy/);
-    assert.match(panel.text(), /only accepts a sign-in that starts from www\.geoguessr\.com’s own web address/);
+    assert.match(panel.text(), /Google sign-in isn't available inside this proxy/);
+    assert.match(panel.text(), /only accepts a sign-in that starts from www\.geoguessr\.com's own web address/);
     assert.match(panel.text(), /You stay on this page, and stay signed out on it/);
 
     // (3) nothing is opened: no provider window, and above all no second copy
@@ -126,7 +126,7 @@ describe('the Google sign-in button on a proxied page', () => {
     assert.match(dom.panel().text(), /Checking…/, 'a loading state on the parent page');
     assert.match(dom.panel().text(), /Asking Google whether this address may start a sign-in/);
     dom.runTimers();
-    assert.match(dom.panel().text(), /Google sign-in isn’t available inside this proxy/);
+    assert.match(dom.panel().text(), /Google sign-in isn't available inside this proxy/);
     assert.deepEqual(dom.opened, [], 'retrying still opens nothing');
 
     findButton(dom.panel(), 'Close').click();
@@ -205,14 +205,14 @@ describe('the Google sign-in button on a proxied page', () => {
 
     assert.equal(result, null);
     assert.deepEqual(dom.opened, [], 'no provider window, because it could only show an origin error');
-    assert.match(dom.panel().text(), /Google sign-in isn’t available inside this proxy/);
+    assert.match(dom.panel().text(), /Google sign-in isn't available inside this proxy/);
   });
 
   test('the token and code clients report the same thing instead of failing silently', () => {
     const dom = createDom();
     dom.auth.sdkBlocked('Google');
     dom.window.google.accounts.oauth2.initTokenClient({ client_id: 'x', scope: 'openid' }).requestAccessToken();
-    assert.match(dom.panel().text(), /isn’t available inside this proxy/);
+    assert.match(dom.panel().text(), /isn't available inside this proxy/);
     assert.deepEqual(dom.opened, []);
     assert.equal(dom.window.google.accounts.oauth2.hasGrantedAllScopes(), false);
   });

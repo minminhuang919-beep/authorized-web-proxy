@@ -639,12 +639,12 @@
     var card = openPanel();
     fill(
       card,
-      name + ' sign-in isn’t available inside this proxy',
+      name + " sign-in isn't available inside this proxy",
       detail ||
         name +
           ' only accepts a sign-in that starts from ' +
           host +
-          '’s own web address. This page is being served through the proxy, so ' +
+          "'s own web address. This page is being served through the proxy, so " +
           name +
           ' refuses the request before any sign-in window can open. Nothing can be done about that from here without impersonating ' +
           host +
