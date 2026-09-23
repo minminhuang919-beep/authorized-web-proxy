@@ -256,6 +256,61 @@ export function buildSignInHandoff(url, { kind = '', returnTo = null } = {}) {
 }
 
 /**
+ * What kind of request is this? A sign-in flow is only ever *explained* to a
+ * human on a page they navigated to; anything else is a sub-resource, and
+ * answering a `<script>`, `fetch()` or `<iframe>` with an HTML page is how the
+ * hand-off used to break sites silently (a "Sign in with Google" SDK script
+ * would receive HTML, fail to parse, and the site's button would go dead).
+ *
+ * `Sec-Fetch-Dest` is sent by every current browser. Without it, an `Accept`
+ * header asking for HTML is treated as a navigation and everything else as a
+ * sub-resource.
+ *
+ * @param {Record<string, string|string[]|undefined>} headers
+ * @returns {'document'|'script'|'other'}
+ */
+export function requestDestination(headers = {}) {
+  const dest = String(headers['sec-fetch-dest'] || '').toLowerCase();
+  if (dest === 'script' || dest === 'serviceworker' || dest === 'worker' || dest === 'sharedworker') return 'script';
+  if (dest === 'document') return 'document';
+  if (dest) return 'other';
+  const mode = String(headers['sec-fetch-mode'] || '').toLowerCase();
+  if (mode === 'navigate') return 'document';
+  const accept = String(headers.accept || '');
+  if (accept.includes('text/html') || accept.includes('application/xhtml+xml')) return 'document';
+  if (!accept || accept === '*/*') return 'document';
+  return 'other';
+}
+
+/**
+ * Third-party sign-in SDKs, matched by URL. These are ordinary public
+ * JavaScript files, but they are not ordinary scripts: each one refuses to
+ * work unless `window.location.origin` is an origin registered with the
+ * provider for that site's OAuth client, which a proxied page can never be
+ * without forging it. Loading one through the proxy is therefore pointless,
+ * and — because the proxy answered the request with an HTML page — used to
+ * break the site's sign-in button outright.
+ *
+ * The client shim intercepts these before they are ever fetched (see
+ * `src/public/shim.js`); this list is the server's copy, used to answer a
+ * script request with a script instead of a page.
+ *
+ * Conservative on purpose: a host plus a specific path, never a bare host.
+ * @param {URL} url
+ * @returns {string} the provider's name, or '' when this is not a sign-in SDK
+ */
+export function identitySdkProvider(url) {
+  if (!(url instanceof URL)) return '';
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname;
+  if (host === 'accounts.google.com' && path.startsWith('/gsi/')) return 'Google';
+  if (host === 'apis.google.com' && (path.startsWith('/js/platform') || path.startsWith('/js/api'))) return 'Google';
+  if (host === 'appleid.cdn-apple.com' && path.startsWith('/appleauth/static/jsapi')) return 'Apple';
+  if (host === 'connect.facebook.net' && /\/sdk\.js$/.test(path)) return 'Facebook';
+  return '';
+}
+
+/**
  * Hosts whose authentication flows the administrator has taken responsibility
  * for (PROXY_AUTH_FLOW_HOSTS). Same matching as the authorized scope:
  * `app.example.com` exactly, `*.example.com` for subdomains only. `*` is

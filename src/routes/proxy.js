@@ -8,7 +8,7 @@
  */
 import { pipeline } from 'node:stream';
 import { AuthFlowUnsupportedError, DomainBlockedError, DomainNotAllowedError, InvalidUrlError, ProxyError, RequestTooLargeError } from '../errors.js';
-import { buildSignInHandoff, detectAuthFlow, redactUrlForDisplay } from '../security/auth-flow.js';
+import { buildSignInHandoff, detectAuthFlow, identitySdkProvider, redactUrlForDisplay, requestDestination } from '../security/auth-flow.js';
 import { splitProxyPath, targetFromProxyPath, toProxyPath, validateTarget } from '../security/target.js';
 import { ACCEPT_ENCODING, canDecode, clientAccepts, createDecoder, normalizeEncoding } from '../upstream/decompress.js';
 import { buildUpstreamRequestHeaders, filterUpstreamResponseHeaders } from '../upstream/headers.js';
@@ -49,6 +49,34 @@ export default async function proxyRoutes(app) {
     const cfg = { pageUrl: target.href, prefix: '/p/', mode: config.unlistedUrlMode, allowed: allowlist.patterns() };
     return `<script>window.__PXY__=${safeJsonForScript(cfg)};</script><script src="/_/shim.js"></script>`;
   };
+
+  /**
+   * A sign-in SDK was requested as a <script>. Serve a real script (never a
+   * page) that hands the button over to the client shim, so the site's
+   * `onload` bookkeeping still runs and its sign-in control becomes usable
+   * again instead of dying silently. It defines no credential, calls no site
+   * callback and carries nothing from the request.
+   */
+  function sendSdkStub(reply, provider) {
+    const name = /^[A-Za-z]{1,20}$/.test(provider) ? provider : 'this';
+    return reply
+      .code(200)
+      .header('content-type', 'application/javascript; charset=utf-8')
+      .header('cache-control', 'no-store')
+      .send(
+        `/* AnonView: ${name} sign-in cannot run on a proxied origin. */\n` +
+          `(function(){var a=window.__PXY_AUTH__;if(a&&a.sdkBlocked){a.sdkBlocked(${JSON.stringify(name)});}})();\n`
+      );
+  }
+
+  /** Any other sub-resource: a short JSON refusal, never an HTML page. */
+  function sendAuthRefusal(reply, kind) {
+    return reply
+      .code(501)
+      .header('content-type', 'application/json; charset=utf-8')
+      .header('cache-control', 'no-store')
+      .send({ error: { status: 501, code: 'AUTH_FLOW_UNSUPPORTED', message: 'Sign-in must be completed on the original website.', kind } });
+  }
 
   /** Translate a proxied Referer back to its upstream form. */
   function upstreamReferer(request) {
@@ -98,7 +126,15 @@ export default async function proxyRoutes(app) {
       // again; it is a plain link, never a redirect URI given to the provider.
       const authFlow = detectAuthFlow(target);
       if (authFlow && !authFlowExemptions.isExempt(target.hostname)) {
-        request.log.info({ host: target.hostname, kind: authFlow.kind }, 'sign-in flow handed off to the browser');
+        const dest = requestDestination(request.headers);
+        request.log.info({ host: target.hostname, kind: authFlow.kind, dest }, 'sign-in flow handed off to the browser');
+        // Only a navigation gets the page: answering a <script>, fetch() or
+        // <iframe> with HTML is what used to kill a site's "Sign in with
+        // Google" button silently. A sign-in SDK gets a *script* that tells
+        // the shim to take over the button; anything else gets a small JSON
+        // refusal with an honest content type.
+        if (dest === 'script') return sendSdkStub(reply, identitySdkProvider(target) || 'this');
+        if (dest !== 'document') return sendAuthRefusal(reply, authFlow.kind);
         const handoff = buildSignInHandoff(target, { kind: authFlow.kind, returnTo: upstreamReferer(request) });
         throw new AuthFlowUnsupportedError(target.hostname, { ...authFlow, origin: target.origin, ...handoff });
       }
@@ -180,7 +216,10 @@ export default async function proxyRoutes(app) {
           const redirectFlow = detectAuthFlow(resolved);
           if (redirectFlow && !authFlowExemptions.isExempt(resolved.hostname)) {
             res.body.destroy();
-            request.log.info({ host: resolved.hostname, kind: redirectFlow.kind }, 'sign-in redirect handed off to the browser');
+            const redirectDest = requestDestination(request.headers);
+            request.log.info({ host: resolved.hostname, kind: redirectFlow.kind, dest: redirectDest }, 'sign-in redirect handed off to the browser');
+            if (redirectDest === 'script') return sendSdkStub(reply, identitySdkProvider(resolved) || 'this');
+            if (redirectDest !== 'document') return sendAuthRefusal(reply, redirectFlow.kind);
             // The page that redirected is where the visitor was, so it is the
             // natural place to sign in from once they are out of the proxy.
             const handoff = buildSignInHandoff(resolved, { kind: redirectFlow.kind, returnTo: target });

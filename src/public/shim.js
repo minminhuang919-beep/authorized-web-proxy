@@ -98,6 +98,7 @@
 
   function rewriteAttr(name, value, el) {
     var n = String(name).toLowerCase();
+    if (n === 'src' && el && el.tagName && el.tagName.toUpperCase() === 'SCRIPT') return rewriteScriptSrc(value, el);
     if (SRCSET_ATTRS.indexOf(n) !== -1) return rewriteSrcset(value);
     if (n === 'style') return rewriteCssText(value);
     if (n === 'data' && !(el && el.tagName && el.tagName.toLowerCase() === 'object')) return value;
@@ -162,7 +163,6 @@
     [w.HTMLLinkElement, 'href'],
     [w.HTMLBaseElement, 'href'],
     [w.HTMLImageElement, 'src'],
-    [w.HTMLScriptElement, 'src'],
     [w.HTMLIFrameElement, 'src'],
     [w.HTMLFrameElement, 'src'],
     [w.HTMLEmbedElement, 'src'],
@@ -180,6 +180,9 @@
   for (var i = 0; i < urlProps.length; i++) {
     if (urlProps[i][0]) patchSetter(urlProps[i][0].prototype, urlProps[i][1], rewrite);
   }
+  // Scripts get their own handler: a third-party sign-in SDK must not be
+  // loaded at all (see "Third-party sign-in SDKs" below).
+  if (w.HTMLScriptElement) patchSetter(w.HTMLScriptElement.prototype, 'src', rewriteScriptSrc);
   if (w.HTMLImageElement) patchSetter(w.HTMLImageElement.prototype, 'srcset', rewriteSrcset);
   if (w.HTMLSourceElement) patchSetter(w.HTMLSourceElement.prototype, 'srcset', rewriteSrcset);
 
@@ -301,6 +304,350 @@
     var args = Array.prototype.slice.call(arguments);
     if (url !== undefined && url !== null) args[0] = rewrite(String(url));
     return origOpenWin.apply(this, args);
+  };
+
+  // --- Third-party sign-in SDKs -------------------------------------------
+  //
+  // A "Sign in with Google/Apple/..." SDK is bound to the application's own
+  // origin: Google Identity Services checks `window.location.origin` against
+  // the Authorized JavaScript origins registered for that site's OAuth client.
+  // A proxied page is served from this proxy's origin, so the SDK refuses to
+  // work. We never fake that origin, and we never touch anyone else's OAuth
+  // configuration.
+  //
+  // What used to happen: the SDK's URL was rewritten into the proxy, the proxy
+  // answered the <script> with its HTML "Sign-in required" page, the script
+  // failed to parse, its `onload` never fired, and the site therefore never
+  // called `renderButton()`. The sign-in control stayed an empty <div> and
+  // clicking it did nothing at all.
+  //
+  // What happens now: the SDK is never fetched. A minimal stand-in is
+  // installed so the page's own bookkeeping still runs, and the control it
+  // renders explains the situation and offers to open the real site in the
+  // visitor's own browser. No credential is ever produced, and the site's
+  // callback is never invoked, so the page can never believe someone signed in.
+
+  var EMPTY_SCRIPT = 'data:text/javascript,';
+  var blockedSdks = {};
+
+  function matchAuthSdk(u) {
+    var host = u.hostname.toLowerCase();
+    var path = u.pathname;
+    if (host === 'accounts.google.com' && path.indexOf('/gsi/') === 0) return 'Google';
+    if (host === 'apis.google.com' && (path.indexOf('/js/platform') === 0 || path.indexOf('/js/api') === 0)) return 'Google';
+    if (host === 'appleid.cdn-apple.com' && path.indexOf('/appleauth/static/jsapi') === 0) return 'Apple';
+    if (host === 'connect.facebook.net' && /\/sdk\.js$/.test(path)) return 'Facebook';
+    return '';
+  }
+
+  /** `/p/https/host/path` back to the upstream URL it stands for. */
+  function fromProxyPath(s) {
+    var m = PROXY_PATH_RE.exec(s);
+    return m ? m[1] + '://' + m[2] + (m[3] || '/') : '';
+  }
+
+  function rewriteScriptSrc(value, el) {
+    if (el && isOwn(el)) return value;
+    var provider = '';
+    try {
+      var s = String(value == null ? '' : value).trim();
+      // Only an http(s) URL can be an SDK. Relative and protocol-relative
+      // forms resolve against the page; data:, blob: and javascript: cannot.
+      var absolute = s.indexOf(PREFIX) === 0 ? fromProxyPath(s) : SCHEME_RE.test(s) && !/^https?:/i.test(s) ? '' : s;
+      if (absolute) provider = matchAuthSdk(new URL(absolute, currentPageUrl()));
+    } catch (e) {
+      provider = '';
+    }
+    if (!provider) return rewrite(value);
+    sdkBlocked(provider);
+    // An empty script: it loads instantly, so the page's `onload` handler runs
+    // exactly as it would have, and nothing is requested from the provider.
+    return EMPTY_SCRIPT;
+  }
+
+  /** Record that a provider's SDK was withheld, and install its stand-in. */
+  function sdkBlocked(provider) {
+    var name = String(provider || 'this').replace(/[^A-Za-z]/g, '') || 'this';
+    blockedSdks[name] = true;
+    if (name === 'Google') installGoogleIdentity();
+    return name;
+  }
+
+  /**
+   * The smallest usable stand-in for Google Identity Services. It stores no
+   * client id, produces no credential and never calls the site's callback --
+   * `renderButton` simply draws a control that hands off to the real site.
+   */
+  function installGoogleIdentity() {
+    var g = (w.google = w.google || {});
+    g.accounts = g.accounts || {};
+    if (g.accounts.id && g.accounts.id.__pxy) return;
+    var notDisplayed = {
+      isDisplayMoment: function () {
+        return false;
+      },
+      isDisplayed: function () {
+        return false;
+      },
+      isNotDisplayed: function () {
+        return true;
+      },
+      // The same reason a real browser reports when One Tap cannot run:
+      // the origin is not one the client is configured for.
+      getNotDisplayedReason: function () {
+        return 'opt_out_or_no_session';
+      },
+      isSkippedMoment: function () {
+        return false;
+      },
+      isDismissedMoment: function () {
+        return false;
+      }
+    };
+    g.accounts.id = {
+      __pxy: true,
+      initialize: function () {},
+      renderButton: function (parent, options) {
+        renderHandoffButton(parent, 'Google', options);
+      },
+      prompt: function (listener) {
+        if (typeof listener === 'function') {
+          try {
+            listener(notDisplayed);
+          } catch (e) {
+            /* the site's own handler threw: not our problem to fix */
+          }
+        }
+      },
+      disableAutoSelect: function () {},
+      cancel: function () {},
+      storeCredential: function (_c, done) {
+        if (typeof done === 'function') done();
+      },
+      revoke: function (_h, done) {
+        if (typeof done === 'function') done({ successful: false, error: 'proxied origin' });
+      }
+    };
+    // The authorization-code / access-token clients hand off the same way.
+    g.accounts.oauth2 = g.accounts.oauth2 || {
+      initTokenClient: function () {
+        return {
+          requestAccessToken: function () {
+            openHandoff('Google');
+          }
+        };
+      },
+      initCodeClient: function () {
+        return {
+          requestCode: function () {
+            openHandoff('Google');
+          }
+        };
+      },
+      hasGrantedAllScopes: function () {
+        return false;
+      },
+      hasGrantedAnyScope: function () {
+        return false;
+      },
+      revoke: function (_t, done) {
+        if (typeof done === 'function') done();
+      }
+    };
+  }
+
+  /** The site's own container, filled with a control that actually does something. */
+  function renderHandoffButton(parent, provider, options) {
+    if (!parent || parent.nodeType !== 1) return;
+    var existing = parent.querySelector('[data-pxy-auth-button]');
+    if (existing) return;
+    var width = options && options.width ? String(options.width).replace(/[^0-9]/g, '') : '';
+    var btn = document.createElement('button');
+    btn.setAttribute('type', 'button');
+    btn.setAttribute('data-pxy-ignore', '1');
+    btn.setAttribute('data-pxy-auth-button', provider);
+    btn.textContent = 'Continue with ' + provider;
+    btn.style.cssText =
+      'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:8px;' +
+      'width:' + (width ? width + 'px' : '100%') + ';min-width:180px;height:100%;min-height:40px;padding:0 16px;' +
+      'font:500 14px/1 system-ui,-apple-system,Segoe UI,sans-serif;color:#1f1f1f;background:#fff;' +
+      'border:1px solid #747775;border-radius:20px;cursor:pointer;';
+    btn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openHandoff(provider);
+    });
+    parent.appendChild(btn);
+  }
+
+  /** The current page on its real origin: origin and path only, never the query. */
+  function directSiteUrl() {
+    try {
+      var u = new URL(currentPageUrl());
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+      return u.origin + (u.pathname && u.pathname !== '/' ? u.pathname : '/');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  var panelEl = null;
+  var opening = false;
+
+  function closePanel() {
+    if (panelEl && panelEl.parentNode) panelEl.parentNode.removeChild(panelEl);
+    panelEl = null;
+    opening = false;
+  }
+
+  function el(tag, css, text) {
+    var node = document.createElement(tag);
+    node.setAttribute('data-pxy-ignore', '1');
+    if (css) node.style.cssText = css;
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  /**
+   * Explain, then hand off. One window per click: `opening` blocks a second
+   * attempt while one is in flight, so a blocked popup can never turn into a
+   * loop of popup attempts.
+   */
+  function openHandoff(provider) {
+    var site = directSiteUrl();
+    var host = '';
+    try {
+      host = new URL(site).hostname;
+    } catch (e) {
+      host = 'the original website';
+    }
+    closePanel();
+    panelEl = el(
+      'div',
+      'all:initial;position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
+        'background:rgba(4,8,12,.72);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;'
+    );
+    var card = el(
+      'div',
+      'all:initial;box-sizing:border-box;max-width:440px;width:calc(100% - 32px);padding:24px;border-radius:14px;' +
+        'background:#121820;color:#e6edf3;box-shadow:0 18px 48px rgba(0,0,0,.55);font:inherit;text-align:left;'
+    );
+    var title = el('h2', 'all:initial;display:block;font:600 18px/1.3 inherit;color:#fff;margin:0 0 10px;', 'Sign-in required');
+    var body = el(
+      'p',
+      'all:initial;display:block;font:inherit;color:#9fb0c0;margin:0 0 18px;',
+      provider +
+        ' sign-in has to run on ' +
+        host +
+        ' itself. ' +
+        provider +
+        ' checks the website address it was opened from, and this page is being served through the proxy, so it will not accept a sign-in started here.'
+    );
+    var actions = el('div', 'all:initial;display:flex;flex-wrap:wrap;gap:10px;font:inherit;');
+    var note = el('p', 'all:initial;display:block;font:400 12px/1.5 inherit;color:#7d8d9c;margin:16px 0 0;', 'You will stay signed out on this proxied page.');
+
+    var go = el(
+      'button',
+      'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
+        'border-radius:10px;background:#4cc2ff;color:#04121c;font:600 14px/1 inherit;cursor:pointer;'
+    );
+    go.setAttribute('type', 'button');
+    go.textContent = site ? 'Continue on ' + host : 'Continue on the original website';
+
+    var cancel = el(
+      'button',
+      'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
+        'border-radius:10px;border:1px solid #2b3a48;color:#9fb0c0;font:500 14px/1 inherit;cursor:pointer;'
+    );
+    cancel.setAttribute('type', 'button');
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', closePanel);
+
+    go.addEventListener('click', function () {
+      if (opening || !site) return;
+      opening = true;
+      var win = null;
+      try {
+        win = origOpenWin.call(w, site, '_blank', 'noopener,noreferrer');
+      } catch (e) {
+        win = null;
+      }
+      if (win) {
+        closePanel();
+        return;
+      }
+      // The browser refused the window. Do not try again on our own: offer a
+      // link the visitor clicks themselves, which a popup blocker allows.
+      showBlocked(card, site, host);
+    });
+
+    actions.appendChild(go);
+    actions.appendChild(cancel);
+    card.appendChild(title);
+    card.appendChild(body);
+    card.appendChild(actions);
+    card.appendChild(note);
+    panelEl.appendChild(card);
+    panelEl.addEventListener('click', function (ev) {
+      if (ev.target === panelEl) closePanel();
+    });
+    (document.body || document.documentElement).appendChild(panelEl);
+    try {
+      go.focus();
+    } catch (e) {
+      /* focus is a nicety */
+    }
+  }
+
+  /** Popup blocked: say so, and give the visitor a link to click themselves. */
+  function showBlocked(card, site, host) {
+    while (card.firstChild) card.removeChild(card.firstChild);
+    card.appendChild(el('h2', 'all:initial;display:block;font:600 18px/1.3 inherit;color:#fff;margin:0 0 10px;', 'Sign-in window was blocked'));
+    card.appendChild(
+      el(
+        'p',
+        'all:initial;display:block;font:inherit;color:#9fb0c0;margin:0 0 18px;',
+        'Your browser stopped the sign-in window from opening. Use the link below to open ' + host + ' yourself.'
+      )
+    );
+    var row = el('div', 'all:initial;display:flex;flex-wrap:wrap;gap:10px;font:inherit;');
+    var link = document.createElement('a');
+    link.setAttribute('data-pxy-ignore', '1');
+    link.setAttribute('href', site);
+    link.setAttribute('target', '_blank');
+    link.setAttribute('rel', 'noopener noreferrer nofollow');
+    link.setAttribute('referrerpolicy', 'no-referrer');
+    link.textContent = 'Open ' + host;
+    link.style.cssText =
+      'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
+      'border-radius:10px;background:#4cc2ff;color:#04121c;font:600 14px/1 inherit;cursor:pointer;';
+    link.addEventListener('click', function () {
+      setTimeout(closePanel, 0);
+    });
+    var dismiss = el(
+      'button',
+      'all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:10px 18px;' +
+        'border-radius:10px;border:1px solid #2b3a48;color:#9fb0c0;font:500 14px/1 inherit;cursor:pointer;'
+    );
+    dismiss.setAttribute('type', 'button');
+    dismiss.textContent = 'Close';
+    dismiss.addEventListener('click', closePanel);
+    row.appendChild(link);
+    row.appendChild(dismiss);
+    card.appendChild(row);
+    // `opening` deliberately stays set: once the browser has refused a window,
+    // this panel never asks for another one. Only closing it (or a fresh click
+    // on the site's sign-in control) allows a new attempt, so a blocked popup
+    // can never become a loop of popup attempts.
+  }
+
+  // The proxy serves this same entry point in place of a sign-in SDK that was
+  // requested as a <script> without the shim having caught it first.
+  w.__PXY_AUTH__ = {
+    sdkBlocked: sdkBlocked,
+    handoff: openHandoff,
+    directSiteUrl: directSiteUrl,
+    blocked: blockedSdks
   };
 
   // --- Catch-all: observe the DOM for anything the patches above missed ----
