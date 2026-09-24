@@ -42,9 +42,15 @@ const REQUEST_DROP = new Set([
   'x-forwarded-port',
   'x-forwarded-server',
   'x-original-url',
-  'x-rewrite-url',
-  'x-csrf-token',
-  'x-requested-with'
+  'x-rewrite-url'
+  // NOTE: `x-requested-with` and `x-csrf-token` are deliberately NOT dropped.
+  // They are set by a site's own JavaScript for its own backend (CSRF / AJAX
+  // markers on state-changing calls such as "send email code"); stripping them
+  // made the site's backend reject the request and the button do nothing. They
+  // are the site's own headers, forwarded to the same site — never read, logged
+  // or altered here — so this preserves the site's protection rather than
+  // weakening it. The proxy's admin routes read `x-csrf-token` on their own
+  // handlers and are unaffected by this upstream-forwarding list.
 ]);
 
 /** Prefixes of client request headers that are never forwarded upstream. */

@@ -74,6 +74,10 @@ export function createMockSite() {
 
   function handle(req, res, url, record) {
     const p = url.pathname;
+    // A modern client-side-routed "gaming" site, served on its own host so the
+    // SPA/nested-path/asset behaviour can be exercised end-to-end (see
+    // spa-proxy.test.js). Everything else keeps the flat site.test behaviour.
+    if (record.host === 'arcade.test') return gaming(res, url);
     switch (true) {
       case p === '/':
         return html(res, HOME_HTML, {
@@ -205,6 +209,33 @@ export function createMockSite() {
       case p === '/echo-body':
         res.writeHead(200, { 'content-type': 'application/json' });
         return res.end(JSON.stringify({ method: req.method, contentType: req.headers['content-type'] || null, body: record.body.toString('utf8'), length: record.body.length }));
+      // A first-party "send email code" endpoint. It mirrors how real sites
+      // protect state-changing calls: the request is accepted only when the
+      // site's own CSRF token and X-Requested-With header (set by the site's
+      // own JavaScript) arrive, and when Origin matches the site. It reports
+      // *presence* of those headers only — never their values, and never the
+      // email — so tests can assert what survived the proxy without capturing
+      // any authentication material.
+      case p === '/api/auth/email/send-code': {
+        const csrf = req.headers['x-csrf-token'] || req.headers['x-xsrf-token'];
+        const xrw = req.headers['x-requested-with'];
+        const originOk = req.headers.origin === 'http://site.test' || req.headers.origin === 'https://site.test';
+        const ok = req.method === 'POST' && Boolean(csrf) && xrw === 'XMLHttpRequest' && originOk;
+        res.writeHead(ok ? 200 : 403, { 'content-type': 'application/json' });
+        return res.end(
+          JSON.stringify({
+            ok,
+            method: req.method,
+            sawCsrf: Boolean(csrf),
+            sawRequestedWith: xrw || null,
+            origin: req.headers.origin || null,
+            sawContentType: req.headers['content-type'] || null,
+            hasBody: record.body.length > 0,
+            // what the site would render next; never anything from the request
+            next: ok ? 'enter-code' : 'rejected'
+          })
+        );
+      }
       case p.startsWith('/status/'): {
         const code = Number(p.slice('/status/'.length));
         res.writeHead(code, { 'content-type': 'text/html', 'x-status-test': '1' });
@@ -287,6 +318,108 @@ export function createMockSite() {
       default:
         res.writeHead(404, { 'content-type': 'text/html' });
         return res.end('<html><body>mock 404</body></html>');
+    }
+  }
+
+  // --- "arcade.test": a modern, client-side-routed gaming site ------------
+  //
+  // Models the shapes that break naive proxies: a locale redirect on `/`, a
+  // `<base href>`, nested game pages that live under a trailing slash, assets
+  // referenced relatively / root-relatively / with encoded characters, and a
+  // JSON data endpoint the SPA fetches. Unknown paths get a branded 404 (like
+  // Poki's "the page you requested does not exist") so a mis-built upstream
+  // URL shows up as that 404 instead of silently passing.
+  const ARCADE_SHELL = (locale, main) => `<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+<meta charset="utf-8">
+<base href="/${locale}/">
+<title>Arcade</title>
+<link rel="stylesheet" href="/assets/main.css">
+<script src="/assets/app.js" defer></script>
+</head>
+<body>
+<header><a id="home" href="/${locale}">Arcade</a><img id="logo" src="/assets/logo.png" alt=""></header>
+<main id="app">${main}</main>
+</body>
+</html>`;
+
+  function gaming(res, url) {
+    const p = url.pathname;
+    const gameMatch = /^\/([a-z]{2})\/g\/([^/]+)\/?$/.exec(p);
+    switch (true) {
+      // Locale redirect on the bare root — root-relative Location, no slash.
+      case p === '/':
+        res.writeHead(302, { location: '/en' });
+        return res.end();
+      // The SPA shell for a locale home.
+      case p === '/en' || p === '/fr':
+        return html(
+          res,
+          ARCADE_SHELL(
+            p.slice(1),
+            `<nav><a id="all" href="games/">All games</a><a id="feat" href="/en/g/tomb-of-the-mask/">Featured</a></nav>`
+          ),
+          { 'set-cookie': ['loc=en; Path=/'] }
+        );
+      // A listing page under a trailing slash. Links are relative to the
+      // `<base href="/en/">`, plus one root-relative encoded link and one with
+      // a query string.
+      case p === '/en/games/':
+        return html(
+          res,
+          ARCADE_SHELL(
+            'en',
+            `<ul><li><a id="rel" href="g/moto-x3m/">Moto</a></li>` +
+              `<li><a id="enc" href="/en/g/subway%20surfers/">Subway Surfers</a></li>` +
+              `<li><a id="q" href="/en/g/2048/?ref=list&level=3">2048</a></li></ul>`
+          )
+        );
+      // A nested game page under a trailing slash. No <base>: assets are
+      // relative to the page's own directory (the case that most often breaks
+      // through a proxy), alongside one root-relative stylesheet.
+      case Boolean(gameMatch): {
+        const slug = decodeURIComponent(gameMatch[2]).replace(/</g, '');
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        return res.end(`<!DOCTYPE html>
+<html lang="${gameMatch[1]}">
+<head><meta charset="utf-8"><title>${slug}</title>
+<link rel="stylesheet" href="/assets/main.css">
+</head>
+<body>
+<a id="back" href="../../games/">Back</a>
+<h1 id="title">${slug}</h1>
+<img id="thumb" src="thumb.png" alt="">
+<script id="play" src="play.js"></script>
+</body>
+</html>`);
+      }
+      // The relative game script, resolved against the game page's directory.
+      case /^\/[a-z]{2}\/g\/.+\/play\.js$/.test(p):
+        res.writeHead(200, { 'content-type': 'application/javascript' });
+        return res.end(`fetch("/_data/game.json?slug=" + location.pathname.split("/g/")[1]);`);
+      case /^\/[a-z]{2}\/g\/.+\/thumb\.png$/.test(p):
+        res.writeHead(200, { 'content-type': 'image/png', 'content-length': PNG.length });
+        return res.end(PNG);
+      case p === '/assets/app.js':
+        res.writeHead(200, { 'content-type': 'application/javascript', 'cache-control': 'public, max-age=31536000' });
+        return res.end(`export const boot = () => fetch("/_data/games.json?loc=en").then(r => r.json());\nhistory.replaceState(null, "", location.pathname);`);
+      case p === '/assets/main.css':
+        res.writeHead(200, { 'content-type': 'text/css' });
+        return res.end(`@import "tokens.css";\nbody{background:url(/assets/logo.png)}\n.f{src:url(fonts/f.woff2)}`);
+      case p === '/assets/tokens.css':
+        res.writeHead(200, { 'content-type': 'text/css' });
+        return res.end(`:root{--bg:#000}`);
+      case p === '/assets/logo.png':
+        res.writeHead(200, { 'content-type': 'image/png', 'content-length': PNG.length, 'cache-control': 'public, max-age=86400' });
+        return res.end(PNG);
+      case p === '/_data/games.json' || p === '/_data/game.json':
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ ok: true, path: p, query: url.search }));
+      // Poki-style branded 404 for anything else.
+      default:
+        res.writeHead(404, { 'content-type': 'text/html' });
+        return res.end('<!DOCTYPE html><html><body><h1>ERROR</h1><p>Sorry, the page you requested does not exist on this site.</p></body></html>');
     }
   }
 
